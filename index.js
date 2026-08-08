@@ -3,17 +3,16 @@ require('dotenv').config();
 const express = require('express');
 const pino = require('pino');
 const QRCode = require('qrcode');
-const { MongoClient } = require('mongodb');
 const {
   default: makeWASocket,
+  useMultiFileAuthState,
   DisconnectReason,
   fetchLatestBaileysVersion,
 } = require('@whiskeysockets/baileys');
 
-const { useMongoAuthState } = require('./mongoAuthState');
-
 const app = express();
 const PORT = process.env.PORT || 3000;
+const AUTH_DIR = process.env.AUTH_DIR || './auth_state';
 
 let sock = null;
 let latestQR = null;
@@ -61,8 +60,8 @@ function recordMessage(msg) {
   chats.set(jid, chat);
 }
 
-async function startSock(collection) {
-  const { state, saveCreds } = await useMongoAuthState(collection);
+async function startSock() {
+  const { state, saveCreds } = await useMultiFileAuthState(AUTH_DIR);
   const { version } = await fetchLatestBaileysVersion();
 
   sock = makeWASocket({
@@ -95,7 +94,7 @@ async function startSock(collection) {
       const loggedOut = statusCode === DisconnectReason.loggedOut;
       console.log('Connection closed. loggedOut =', loggedOut);
       if (!loggedOut) {
-        startSock(collection); // auto-reconnect
+        startSock(); // auto-reconnect, reuses files in AUTH_DIR
       }
     }
   });
@@ -170,16 +169,6 @@ app.post('/send', async (req, res) => {
 
 // ---------- Boot ----------
 
-(async () => {
-  if (!process.env.MONGO_URI) {
-    console.error('MONGO_URI env var is required');
-    process.exit(1);
-  }
-  const mongoClient = new MongoClient(process.env.MONGO_URI);
-  await mongoClient.connect();
-  const collection = mongoClient.db('whatsapp_baileys').collection('auth');
-
-  await startSock(collection);
-
+startSock().then(() => {
   app.listen(PORT, () => console.log(`Server listening on port ${PORT}`));
-})();
+});
