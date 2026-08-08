@@ -22,14 +22,36 @@ let connectionStatus = 'starting'; // starting | qr | connected | disconnected
 // chats ourselves off the events it emits. Good enough for a J2ME client
 // that just wants a chat list + recent messages, not full sync semantics.
 const chats = new Map(); // jid -> { id, name, unreadCount, lastMessageTs }
+const contacts = new Map(); // jid -> { name, notify, phoneNumber, lid }
 const messages = new Map(); // jid -> array of recent messages (capped)
 const MAX_MESSAGES_PER_CHAT = 50;
+
+function upsertContact(contact) {
+  if (!contact || !contact.id) return;
+  const existing = contacts.get(contact.id) || {};
+  contacts.set(contact.id, {
+    name: contact.name || existing.name,
+    notify: contact.notify || existing.notify,
+    phoneNumber: contact.phoneNumber || existing.phoneNumber,
+    lid: contact.lid || existing.lid,
+  });
+}
+
+// Best display name we can find for a jid: saved contact name, then the
+// name the contact broadcasts about themselves, then whatever the chat
+// object itself carried (group subject, etc), then the raw jid as a last
+// resort — which is what you'll see for a contact WhatsApp hasn't synced
+// yet, or an @lid identity with phone-number privacy on.
+function resolveName(jid, fallback) {
+  const c = contacts.get(jid);
+  return (c && (c.name || c.notify)) || fallback || jid;
+}
 
 function upsertChat(chat) {
   const existing = chats.get(chat.id) || {};
   chats.set(chat.id, {
     id: chat.id,
-    name: chat.name || chat.subject || existing.name || chat.id,
+    name: resolveName(chat.id, chat.name || chat.subject || existing.name),
     unreadCount: chat.unreadCount ?? existing.unreadCount ?? 0,
     lastMessageTs: chat.conversationTimestamp ?? existing.lastMessageTs ?? 0,
   });
@@ -38,6 +60,13 @@ function upsertChat(chat) {
 function recordMessage(msg) {
   const jid = msg.key?.remoteJid;
   if (!jid) return;
+
+  // pushName often arrives with a message even when contacts.upsert hasn't
+  // synced yet for this jid — cheap way to get a real name sooner.
+  if (msg.pushName && !msg.key.fromMe) {
+    upsertContact({ id: jid, notify: msg.pushName });
+  }
+
   const list = messages.get(jid) || [];
   list.push({
     id: msg.key.id,
@@ -55,7 +84,8 @@ function recordMessage(msg) {
   messages.set(jid, list);
 
   // Bump chat's lastMessageTs so /chats can sort by recency
-  const chat = chats.get(jid) || { id: jid, name: jid, unreadCount: 0 };
+  const chat = chats.get(jid) || { id: jid, name: resolveName(jid), unreadCount: 0 };
+  chat.name = resolveName(jid, chat.name);
   chat.lastMessageTs = msg.messageTimestamp;
   chats.set(jid, chat);
 }
@@ -99,9 +129,28 @@ async function startSock() {
     }
   });
 
-  // Initial history sync gives us the chat list on first login/reconnect
-  sock.ev.on('messaging-history.set', ({ chats: syncedChats }) => {
+  // Initial history sync gives us the chat list AND contact list on first
+  // login/reconnect — process contacts first so chat names resolve right away.
+  sock.ev.on('messaging-history.set', ({ chats: syncedChats, contacts: syncedContacts }) => {
+    (syncedContacts || []).forEach(upsertContact);
     (syncedChats || []).forEach(upsertChat);
+  });
+
+  sock.ev.on('contacts.upsert', (newContacts) => {
+    (newContacts || []).forEach(upsertContact);
+    // Re-resolve names for chats we already know about, in case the
+    // contact synced after the chat did.
+    newContacts.forEach((c) => {
+      if (chats.has(c.id)) {
+        const chat = chats.get(c.id);
+        chat.name = resolveName(c.id, chat.name);
+        chats.set(c.id, chat);
+      }
+    });
+  });
+
+  sock.ev.on('contacts.update', (updates) => {
+    (updates || []).forEach((u) => upsertContact({ id: u.id, ...u }));
   });
 
   sock.ev.on('chats.upsert', (newChats) => {
