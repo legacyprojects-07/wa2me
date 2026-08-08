@@ -136,6 +136,19 @@ app.get('/qr', async (req, res) => {
   res.json({ status: 'qr', qr: dataUrl });
 });
 
+// Browser-friendly version: open this URL directly and it renders an
+// actual scannable QR image, instead of the raw data-URL text /qr returns.
+app.get('/qr-image', (req, res) => {
+  if (connectionStatus === 'connected') {
+    return res.status(404).send('Already connected — no QR to show.');
+  }
+  if (!latestQR) {
+    return res.status(404).send('No QR yet — refresh in a few seconds.');
+  }
+  res.type('png');
+  QRCode.toFileStream(res, latestQR, { width: 300 });
+});
+
 app.get('/chats', (req, res) => {
   if (connectionStatus !== 'connected') {
     return res.status(503).json({ error: `Not connected (status: ${connectionStatus})` });
