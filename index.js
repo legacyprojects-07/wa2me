@@ -52,7 +52,11 @@ function upsertChat(chat) {
   chats.set(chat.id, {
     id: chat.id,
     name: resolveName(chat.id, chat.name || chat.subject || existing.name),
-    unreadCount: chat.unreadCount ?? existing.unreadCount ?? 0,
+    // Only take WhatsApp's own unreadCount the first time we see this chat
+    // (initial sync). After that we track it ourselves in recordMessage —
+    // WA's server-reported value doesn't reliably update per-message for
+    // a secondary linked device, so relying on it made counts look stuck.
+    unreadCount: existing.unreadCount ?? chat.unreadCount ?? 0,
     lastMessageTs: chat.conversationTimestamp ?? existing.lastMessageTs ?? 0,
   });
 }
@@ -83,10 +87,15 @@ function recordMessage(msg) {
   if (list.length > MAX_MESSAGES_PER_CHAT) list.shift();
   messages.set(jid, list);
 
-  // Bump chat's lastMessageTs so /chats can sort by recency
+  // Bump chat's lastMessageTs and our own unread counter so /chats can
+  // sort by recency and show a count that actually reflects new messages,
+  // rather than waiting on WhatsApp's own (unreliable here) sync value.
   const chat = chats.get(jid) || { id: jid, name: resolveName(jid), unreadCount: 0 };
   chat.name = resolveName(jid, chat.name);
   chat.lastMessageTs = msg.messageTimestamp;
+  if (!msg.key.fromMe) {
+    chat.unreadCount = (chat.unreadCount || 0) + 1;
+  }
   chats.set(jid, chat);
 }
 
@@ -99,6 +108,12 @@ async function startSock() {
     version,
     logger: pino({ level: 'silent' }),
     printQRInTerminal: false,
+    // Default is false, which only pulls recent/partial chat history.
+    // We want the full chat list, so ask the phone to send everything —
+    // it arrives asynchronously, possibly across several
+    // messaging-history.set events (watch for `isLatest` in logs if you
+    // want to confirm sync completion).
+    syncFullHistory: true,
   });
 
   sock.ev.on('creds.update', saveCreds);
@@ -214,6 +229,13 @@ app.get('/chats', (req, res) => {
 
 app.get('/messages/:jid', (req, res) => {
   const jid = decodeURIComponent(req.params.jid);
+  // Fetching a chat's messages counts as reading it — clear the unread
+  // badge for this jid so /chats reflects it on the next call.
+  const chat = chats.get(jid);
+  if (chat) {
+    chat.unreadCount = 0;
+    chats.set(jid, chat);
+  }
   res.json(messages.get(jid) || []);
 });
 
