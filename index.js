@@ -138,6 +138,8 @@ app.get('/qr', async (req, res) => {
 
 // Browser-friendly version: open this URL directly and it renders an
 // actual scannable QR image, instead of the raw data-URL text /qr returns.
+// Also used directly by the J2ME client — MIDP's Image.createImage()
+// decodes PNG natively, so the phone can fetch this with no base64 step.
 app.get('/qr-image', (req, res) => {
   if (connectionStatus === 'connected') {
     return res.status(404).send('Already connected — no QR to show.');
@@ -145,8 +147,10 @@ app.get('/qr-image', (req, res) => {
   if (!latestQR) {
     return res.status(404).send('No QR yet — refresh in a few seconds.');
   }
+  let size = parseInt(req.query.size, 10);
+  if (!size || size < 80 || size > 500) size = 300;
   res.type('png');
-  QRCode.toFileStream(res, latestQR, { width: 300 });
+  QRCode.toFileStream(res, latestQR, { width: size });
 });
 
 app.get('/chats', (req, res) => {
