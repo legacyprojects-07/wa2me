@@ -1,0 +1,22 @@
+{
+  "name": "whatsapp-nokia-backend",
+  "version": "1.0.0",
+  "description": "Baileys WhatsApp backend for a J2ME Nokia thin client",
+  "main": "index.js",
+  "type": "commonjs",
+  "scripts": {
+    "start": "node index.js",
+    "dev": "node index.js"
+  },
+  "engines": {
+    "node": ">=18.0.0"
+  },
+  "dependencies": {
+    "@whiskeysockets/baileys": "^6.7.9",
+    "express": "^4.19.2",
+    "mongodb": "^6.8.0",
+    "qrcode": "^1.5.3",
+    "pino": "^9.3.2",
+    "dotenv": "^16.4.5"
+  }
+}
