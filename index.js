@@ -23,7 +23,8 @@ let connectionStatus = 'starting'; // starting | qr | connected | disconnected |
 const chats = new Map(); // jid -> { id, name, unreadCount, lastMessageTs }
 const contacts = new Map(); // jid -> { name, notify, phoneNumber, lid }
 const messages = new Map(); // jid -> array of recent messages (capped)
-const MAX_MESSAGES_PER_CHAT = 100;
+const MAX_MESSAGES_PER_CHAT = 500; // Increased to 500 messages per chat
+const pendingHistoryRequests = new Set(); // Track on-demand history syncs
 
 // Helper to reliably parse Baileys timestamps (handles numbers, strings, and protobuf Long objects)
 function parseTimestamp(ts) {
@@ -101,6 +102,13 @@ function resolveName(jid, fallback) {
   return (c && (c.name || c.notify)) || fallback || jid;
 }
 
+function isSavedContact(jid) {
+  if (jid.endsWith('@g.us')) return true; // Groups are treated as saved
+  const c = contacts.get(jid);
+  // True if we have an explicit saved address book name (contact.name)
+  return Boolean(c && c.name && c.name.trim().length > 0);
+}
+
 function reResolveAllChatNames() {
   for (const [jid, chat] of chats.entries()) {
     const updatedName = resolveName(jid, chat.name);
@@ -116,7 +124,6 @@ function upsertChat(chat, isInitialSync = false) {
   const existing = chats.get(chat.id) || {};
   const resolvedName = resolveName(chat.id, chat.name || chat.subject || existing.name);
 
-  // Preserve self-tracked unreadCount after initial sync
   const unreadCount = (existing.unreadCount !== undefined && !isInitialSync)
     ? existing.unreadCount
     : (chat.unreadCount ?? existing.unreadCount ?? 0);
@@ -138,17 +145,14 @@ function recordMessage(msg, isHistorySync = false) {
   const jid = msg.key?.remoteJid;
   if (!jid) return;
 
-  // Use pushName to seed contact immediately if available
   if (msg.pushName && !msg.key.fromMe) {
     upsertContact({ id: jid, notify: msg.pushName });
   }
 
   const parsed = parseMessageContent(msg);
-  if (!parsed) return; // Protocol message or unparseable
+  if (!parsed) return;
 
   const list = messages.get(jid) || [];
-
-  // Deduplicate messages by ID
   if (list.some((m) => m.id === msg.key.id)) {
     return;
   }
@@ -164,11 +168,10 @@ function recordMessage(msg, isHistorySync = false) {
     mediaUrl: parsed.hasMedia
       ? `/messages/${encodeURIComponent(jid)}/${encodeURIComponent(msg.key.id)}/media`
       : null,
-    rawMsg: parsed.hasMedia ? msg : null, // Retained for media downloads
+    rawMsg: parsed.hasMedia ? msg : null,
   };
 
   list.push(msgObj);
-  // Keep sorted chronologically ascending
   list.sort((a, b) => a.timestamp - b.timestamp);
 
   if (list.length > MAX_MESSAGES_PER_CHAT) {
@@ -176,17 +179,37 @@ function recordMessage(msg, isHistorySync = false) {
   }
   messages.set(jid, list);
 
-  // Update chat metadata
   const existingChat = chats.get(jid) || { id: jid, name: resolveName(jid), unreadCount: 0, lastMessageTs: 0 };
   existingChat.name = resolveName(jid, existingChat.name);
   existingChat.lastMessageTs = Math.max(existingChat.lastMessageTs || 0, timestamp);
 
-  // Only increment unread counter for new incoming live messages (not history sync or outgoing)
   if (!msg.key.fromMe && !isHistorySync) {
     existingChat.unreadCount = (existingChat.unreadCount || 0) + 1;
   }
 
   chats.set(jid, existingChat);
+}
+
+// On-Demand History Sync for chats with few messages loaded
+async function triggerOnDemandHistorySync(jid) {
+  if (!sock || connectionStatus !== 'connected') return;
+  if (pendingHistoryRequests.has(jid)) return;
+
+  const list = messages.get(jid) || [];
+  if (list.length === 0) return;
+
+  const oldest = list[0];
+  if (!oldest || !oldest.rawMsg || !oldest.rawMsg.key) return;
+
+  try {
+    pendingHistoryRequests.add(jid);
+    console.log(`[History Sync] Requesting 50 older messages on-demand for ${jid}...`);
+    await sock.fetchMessageHistory(50, oldest.rawMsg.key, oldest.timestamp * 1000);
+  } catch (err) {
+    console.log(`[History Sync] On-demand history fetch failed for ${jid}: ${err.message}`);
+  } finally {
+    setTimeout(() => pendingHistoryRequests.delete(jid), 15000); // 15s cooldown
+  }
 }
 
 async function startSock() {
@@ -198,8 +221,6 @@ async function startSock() {
     version,
     logger: pino({ level: 'silent' }),
     printQRInTerminal: false,
-    // syncFullHistory: true tells Baileys to request the full chat and message history
-    // from the primary phone during initial connection sync.
     syncFullHistory: true,
   });
 
@@ -223,19 +244,17 @@ async function startSock() {
       connectionStatus = loggedOut ? 'loggedOut' : 'disconnected';
       console.log(`[Baileys] Connection closed. statusCode=${statusCode}, loggedOut=${loggedOut}`);
       if (!loggedOut) {
-        setTimeout(() => startSock(), 3000); // Auto-reconnect after 3s
+        setTimeout(() => startSock(), 3000);
       }
     }
   });
 
-  // Handle Full History Sync: Process contacts, chats, and past messages
   sock.ev.on('messaging-history.set', ({ chats: syncedChats, contacts: syncedContacts, messages: syncedMessages, isLatest }) => {
-    console.log(`[History Sync] Synced ${syncedChats?.length || 0} chats, ${syncedContacts?.length || 0} contacts, ${syncedMessages?.length || 0} past messages. isLatest: ${Boolean(isLatest)}`);
+    console.log(`[History Sync] Synced ${syncedChats?.length || 0} chats, ${syncedContacts?.length || 0} contacts, ${syncedMessages?.length || 0} past messages.`);
     
     (syncedContacts || []).forEach(upsertContact);
     (syncedChats || []).forEach((c) => upsertChat(c, true));
 
-    // Process historical messages (isHistorySync = true avoids incrementing unreadCount)
     if (Array.isArray(syncedMessages) && syncedMessages.length > 0) {
       const sorted = [...syncedMessages].sort((a, b) => parseTimestamp(a.messageTimestamp) - parseTimestamp(b.messageTimestamp));
       sorted.forEach((msg) => recordMessage(msg, true));
@@ -261,8 +280,7 @@ async function startSock() {
     (updates || []).forEach((u) => upsertChat({ id: u.id, ...u }, false));
   });
 
-  sock.ev.on('messages.upsert', ({ messages: msgs, type }) => {
-    // Only process notify or append messages
+  sock.ev.on('messages.upsert', ({ messages: msgs }) => {
     (msgs || []).forEach((m) => recordMessage(m, false));
   });
 }
@@ -271,7 +289,6 @@ async function startSock() {
 app.use(express.json({ limit: '16mb' }));
 app.use(express.urlencoded({ extended: true, limit: '16mb' }));
 
-// CORS headers for client flexibility
 app.use((req, res, next) => {
   res.header('Access-Control-Allow-Origin', '*');
   res.header('Access-Control-Allow-Methods', 'GET, POST, OPTIONS');
@@ -282,7 +299,6 @@ app.use((req, res, next) => {
   next();
 });
 
-// 1. Health Status Endpoint (used by J2ME client & Uptime monitors)
 app.get('/health', (req, res) => {
   res.json({
     status: connectionStatus,
@@ -292,7 +308,6 @@ app.get('/health', (req, res) => {
   });
 });
 
-// 2. QR JSON Endpoint (returns base64 data URL string)
 app.get('/qr', async (req, res) => {
   if (connectionStatus === 'connected') {
     return res.json({ status: 'connected', qr: null });
@@ -304,7 +319,6 @@ app.get('/qr', async (req, res) => {
   res.json({ status: 'qr', qr: dataUrl });
 });
 
-// 3. QR Image Endpoint (serves raw PNG binary for J2ME Image.createImage and browsers)
 app.get('/qr-image', (req, res) => {
   if (connectionStatus === 'connected') {
     return res.status(404).send('Already connected — no QR to show.');
@@ -319,18 +333,32 @@ app.get('/qr-image', (req, res) => {
   QRCode.toFileStream(res, latestQR, { width: size });
 });
 
-// 4. List All Chats (sorted by recency descending)
+// List All Chats:
+// 1. Removes @lid ghost numbers
+// 2. Removes unsaved contacts (keeps saved address book contacts and groups)
+// 3. Prioritizes saved contacts sorted by recent message timestamp descending
 app.get('/chats', (req, res) => {
   if (connectionStatus !== 'connected') {
     return res.status(503).json({ error: `Not connected (status: ${connectionStatus})` });
   }
-  const list = Array.from(chats.values()).sort(
-    (a, b) => (b.lastMessageTs || 0) - (a.lastMessageTs || 0)
-  );
-  res.json(list);
+
+  const allChats = Array.from(chats.values());
+
+  const filtered = allChats.filter((chat) => {
+    if (!chat || !chat.id) return false;
+    // Remove @lid ghost numbers
+    if (chat.id.endsWith('@lid')) return false;
+    // Remove unsaved numbers (keep only saved address-book names and group chats)
+    return isSavedContact(chat.id);
+  });
+
+  // Sort by lastMessageTs descending (highest priority saved contacts with recent messages first)
+  filtered.sort((a, b) => (b.lastMessageTs || 0) - (a.lastMessageTs || 0));
+
+  res.json(filtered);
 });
 
-// 5. Get Messages for a Chat (resets unreadCount, returns chronological array)
+// Get Messages for a Chat (resets unreadCount, returns chronological array, triggers history sync if needed)
 app.get('/messages/:jid', (req, res) => {
   const jid = decodeURIComponent(req.params.jid);
   const chat = chats.get(jid);
@@ -338,11 +366,18 @@ app.get('/messages/:jid', (req, res) => {
     chat.unreadCount = 0;
     chats.set(jid, chat);
   }
-  const list = (messages.get(jid) || []).map(({ rawMsg, ...rest }) => rest);
-  res.json(list);
+
+  const list = messages.get(jid) || [];
+  // If we only have a few messages, request older history on-demand in the background
+  if (list.length > 0 && list.length <= 10) {
+    triggerOnDemandHistorySync(jid);
+  }
+
+  const cleanList = list.map(({ rawMsg, ...rest }) => rest);
+  res.json(cleanList);
 });
 
-// 6. Media Download Endpoint (streams image/video/audio binary to J2ME client or browser)
+// Media Download Endpoint with jpegThumbnail fallback for historical/expired photos
 app.get('/messages/:jid/:msgId/media', async (req, res) => {
   if (!sock || connectionStatus !== 'connected') {
     return res.status(503).send('Not connected to WhatsApp');
@@ -357,6 +392,7 @@ app.get('/messages/:jid/:msgId/media', async (req, res) => {
   }
 
   try {
+    // Attempt primary high-res download
     const buffer = await downloadMediaMessage(
       msgObj.rawMsg,
       'buffer',
@@ -376,14 +412,22 @@ app.get('/messages/:jid/:msgId/media', async (req, res) => {
     } else {
       res.type('application/octet-stream');
     }
-    res.send(buffer);
+    return res.send(buffer);
   } catch (err) {
-    console.error(`[Media Download Error] ${err.message}`);
-    res.status(500).send('Failed to download media from WhatsApp');
+    console.warn(`[Media Download Warning] High-res download failed (${err.message}). Using jpegThumbnail fallback...`);
+    // Fallback: Extract embedded jpegThumbnail from protobuf imageMessage/videoMessage
+    const content = unwrapMessage(msgObj.rawMsg?.message);
+    const thumb = content?.imageMessage?.jpegThumbnail || content?.videoMessage?.jpegThumbnail;
+    if (thumb) {
+      const buffer = Buffer.from(thumb);
+      res.type('image/jpeg');
+      return res.send(buffer);
+    }
+    res.status(404).send('Media unavailable or expired');
   }
 });
 
-// 7. Send Message (supports JSON with text OR base64 media for J2ME CLDC/MIDP)
+// Send Message (supports JSON with text OR base64 media for J2ME CLDC/MIDP)
 app.post('/send', async (req, res) => {
   const { jid, text, caption, mediaType, mediaBase64 } = req.body || {};
   if (!sock || connectionStatus !== 'connected') {
@@ -418,7 +462,7 @@ app.post('/send', async (req, res) => {
   }
 });
 
-// 8. Send Media (Multipart Form-Data for binary file upload)
+// Send Media (Multipart Form-Data for binary file upload)
 const upload = multer({ limits: { fileSize: 16 * 1024 * 1024 } });
 app.post('/send-media', upload.single('file'), async (req, res) => {
   if (!sock || connectionStatus !== 'connected') {
