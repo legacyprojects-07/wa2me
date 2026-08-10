@@ -1,13 +1,14 @@
 require('dotenv').config();
-
 const express = require('express');
 const pino = require('pino');
 const QRCode = require('qrcode');
+const multer = require('multer');
 const {
   default: makeWASocket,
   useMultiFileAuthState,
   DisconnectReason,
   fetchLatestBaileysVersion,
+  downloadMediaMessage,
 } = require('@whiskeysockets/baileys');
 
 const app = express();
@@ -16,15 +17,73 @@ const AUTH_DIR = process.env.AUTH_DIR || './auth_state';
 
 let sock = null;
 let latestQR = null;
-let connectionStatus = 'starting'; // starting | qr | connected | disconnected
+let connectionStatus = 'starting'; // starting | qr | connected | disconnected | loggedOut
 
-// Baileys' built-in in-memory store was removed from core, so we track
-// chats ourselves off the events it emits. Good enough for a J2ME client
-// that just wants a chat list + recent messages, not full sync semantics.
+// In-memory store rebuilt from Baileys events
 const chats = new Map(); // jid -> { id, name, unreadCount, lastMessageTs }
 const contacts = new Map(); // jid -> { name, notify, phoneNumber, lid }
 const messages = new Map(); // jid -> array of recent messages (capped)
-const MAX_MESSAGES_PER_CHAT = 50;
+const MAX_MESSAGES_PER_CHAT = 100;
+
+// Helper to reliably parse Baileys timestamps (handles numbers, strings, and protobuf Long objects)
+function parseTimestamp(ts) {
+  if (!ts) return Math.floor(Date.now() / 1000);
+  if (typeof ts === 'number') return ts;
+  if (typeof ts === 'string') return parseInt(ts, 10) || Math.floor(Date.now() / 1000);
+  if (typeof ts === 'object' && ts.low !== undefined) {
+    return ts.low;
+  }
+  return Math.floor(Date.now() / 1000);
+}
+
+// Helper to unwrap nested WhatsApp message containers (ephemeral, viewOnce, edited, documentWithCaption)
+function unwrapMessage(message) {
+  if (!message) return null;
+  if (message.ephemeralMessage) return unwrapMessage(message.ephemeralMessage.message);
+  if (message.viewOnceMessage) return unwrapMessage(message.viewOnceMessage.message);
+  if (message.viewOnceMessageV2) return unwrapMessage(message.viewOnceMessageV2.message);
+  if (message.documentWithCaptionMessage) return unwrapMessage(message.documentWithCaptionMessage.message);
+  if (message.editedMessage) return unwrapMessage(message.editedMessage.message);
+  return message;
+}
+
+// Helper to extract text and media type from any WhatsApp message payload
+function parseMessageContent(msg) {
+  const content = unwrapMessage(msg.message);
+  if (!content) return { text: null, mediaType: null, hasMedia: false };
+
+  let text = null;
+  let mediaType = null;
+  let hasMedia = false;
+
+  if (content.conversation) {
+    text = content.conversation;
+  } else if (content.extendedTextMessage?.text) {
+    text = content.extendedTextMessage.text;
+  } else if (content.imageMessage) {
+    mediaType = 'image';
+    hasMedia = true;
+    text = content.imageMessage.caption || '[Photo]';
+  } else if (content.videoMessage) {
+    mediaType = 'video';
+    hasMedia = true;
+    text = content.videoMessage.caption || '[Video]';
+  } else if (content.audioMessage) {
+    mediaType = 'audio';
+    hasMedia = true;
+    text = '[Audio]';
+  } else if (content.documentMessage) {
+    mediaType = 'document';
+    hasMedia = true;
+    text = content.documentMessage.fileName || content.documentMessage.caption || '[Document]';
+  } else if (content.protocolMessage || content.senderKeyDistributionMessage) {
+    return null; // Ignore internal protocol messages
+  } else {
+    text = '[Message]';
+  }
+
+  return { text, mediaType, hasMedia };
+}
 
 function upsertContact(contact) {
   if (!contact || !contact.id) return;
@@ -37,66 +96,97 @@ function upsertContact(contact) {
   });
 }
 
-// Best display name we can find for a jid: saved contact name, then the
-// name the contact broadcasts about themselves, then whatever the chat
-// object itself carried (group subject, etc), then the raw jid as a last
-// resort — which is what you'll see for a contact WhatsApp hasn't synced
-// yet, or an @lid identity with phone-number privacy on.
 function resolveName(jid, fallback) {
   const c = contacts.get(jid);
   return (c && (c.name || c.notify)) || fallback || jid;
 }
 
-function upsertChat(chat) {
+function reResolveAllChatNames() {
+  for (const [jid, chat] of chats.entries()) {
+    const updatedName = resolveName(jid, chat.name);
+    if (updatedName !== chat.name) {
+      chat.name = updatedName;
+      chats.set(jid, chat);
+    }
+  }
+}
+
+function upsertChat(chat, isInitialSync = false) {
+  if (!chat || !chat.id) return;
   const existing = chats.get(chat.id) || {};
+  const resolvedName = resolveName(chat.id, chat.name || chat.subject || existing.name);
+
+  // Preserve self-tracked unreadCount after initial sync
+  const unreadCount = (existing.unreadCount !== undefined && !isInitialSync)
+    ? existing.unreadCount
+    : (chat.unreadCount ?? existing.unreadCount ?? 0);
+
+  const lastMessageTs = Math.max(
+    parseTimestamp(chat.conversationTimestamp),
+    parseTimestamp(existing.lastMessageTs)
+  );
+
   chats.set(chat.id, {
     id: chat.id,
-    name: resolveName(chat.id, chat.name || chat.subject || existing.name),
-    // Only take WhatsApp's own unreadCount the first time we see this chat
-    // (initial sync). After that we track it ourselves in recordMessage —
-    // WA's server-reported value doesn't reliably update per-message for
-    // a secondary linked device, so relying on it made counts look stuck.
-    unreadCount: existing.unreadCount ?? chat.unreadCount ?? 0,
-    lastMessageTs: chat.conversationTimestamp ?? existing.lastMessageTs ?? 0,
+    name: resolvedName,
+    unreadCount: unreadCount,
+    lastMessageTs: lastMessageTs,
   });
 }
 
-function recordMessage(msg) {
+function recordMessage(msg, isHistorySync = false) {
   const jid = msg.key?.remoteJid;
   if (!jid) return;
 
-  // pushName often arrives with a message even when contacts.upsert hasn't
-  // synced yet for this jid — cheap way to get a real name sooner.
+  // Use pushName to seed contact immediately if available
   if (msg.pushName && !msg.key.fromMe) {
     upsertContact({ id: jid, notify: msg.pushName });
   }
 
+  const parsed = parseMessageContent(msg);
+  if (!parsed) return; // Protocol message or unparseable
+
   const list = messages.get(jid) || [];
-  list.push({
+
+  // Deduplicate messages by ID
+  if (list.some((m) => m.id === msg.key.id)) {
+    return;
+  }
+
+  const timestamp = parseTimestamp(msg.messageTimestamp);
+  const msgObj = {
     id: msg.key.id,
-    fromMe: msg.key.fromMe,
-    timestamp: msg.messageTimestamp,
-    text:
-      msg.message?.conversation ||
-      msg.message?.extendedTextMessage?.text ||
-      (msg.message?.imageMessage ? '[image]' : null) ||
-      (msg.message?.videoMessage ? '[video]' : null) ||
-      (msg.message?.audioMessage ? '[audio]' : null) ||
-      null,
-  });
-  if (list.length > MAX_MESSAGES_PER_CHAT) list.shift();
+    fromMe: Boolean(msg.key.fromMe),
+    timestamp: timestamp,
+    text: parsed.text,
+    mediaType: parsed.mediaType,
+    hasMedia: parsed.hasMedia,
+    mediaUrl: parsed.hasMedia
+      ? `/messages/${encodeURIComponent(jid)}/${encodeURIComponent(msg.key.id)}/media`
+      : null,
+    rawMsg: parsed.hasMedia ? msg : null, // Retained for media downloads
+  };
+
+  list.push(msgObj);
+  // Keep sorted chronologically ascending
+  list.sort((a, b) => a.timestamp - b.timestamp);
+
+  if (list.length > MAX_MESSAGES_PER_CHAT) {
+    list.shift();
+  }
   messages.set(jid, list);
 
-  // Bump chat's lastMessageTs and our own unread counter so /chats can
-  // sort by recency and show a count that actually reflects new messages,
-  // rather than waiting on WhatsApp's own (unreliable here) sync value.
-  const chat = chats.get(jid) || { id: jid, name: resolveName(jid), unreadCount: 0 };
-  chat.name = resolveName(jid, chat.name);
-  chat.lastMessageTs = msg.messageTimestamp;
-  if (!msg.key.fromMe) {
-    chat.unreadCount = (chat.unreadCount || 0) + 1;
+  // Update chat metadata
+  const existingChat = chats.get(jid) || { id: jid, name: resolveName(jid), unreadCount: 0, lastMessageTs: 0 };
+  existingChat.name = resolveName(jid, existingChat.name);
+  existingChat.lastMessageTs = Math.max(existingChat.lastMessageTs || 0, timestamp);
+
+  // Only increment unread counter for new incoming live messages (not history sync or outgoing)
+  if (!msg.key.fromMe && !isHistorySync) {
+    existingChat.unreadCount = (existingChat.unreadCount || 0) + 1;
   }
-  chats.set(jid, chat);
+
+  chats.set(jid, existingChat);
 }
 
 async function startSock() {
@@ -108,11 +198,8 @@ async function startSock() {
     version,
     logger: pino({ level: 'silent' }),
     printQRInTerminal: false,
-    // Default is false, which only pulls recent/partial chat history.
-    // We want the full chat list, so ask the phone to send everything —
-    // it arrives asynchronously, possibly across several
-    // messaging-history.set events (watch for `isLatest` in logs if you
-    // want to confirm sync completion).
+    // syncFullHistory: true tells Baileys to request the full chat and message history
+    // from the primary phone during initial connection sync.
     syncFullHistory: true,
   });
 
@@ -120,75 +207,92 @@ async function startSock() {
 
   sock.ev.on('connection.update', (update) => {
     const { connection, lastDisconnect, qr } = update;
-
     if (qr) {
       latestQR = qr;
       connectionStatus = 'qr';
-      console.log('New QR issued — fetch it from GET /qr');
+      console.log('[Baileys] New QR issued — fetch PNG from GET /qr-image');
     }
-
     if (connection === 'open') {
       connectionStatus = 'connected';
       latestQR = null;
-      console.log('WhatsApp connection open');
+      console.log('[Baileys] WhatsApp connection open');
     }
-
     if (connection === 'close') {
-      connectionStatus = 'disconnected';
       const statusCode = lastDisconnect?.error?.output?.statusCode;
       const loggedOut = statusCode === DisconnectReason.loggedOut;
-      console.log('Connection closed. loggedOut =', loggedOut);
+      connectionStatus = loggedOut ? 'loggedOut' : 'disconnected';
+      console.log(`[Baileys] Connection closed. statusCode=${statusCode}, loggedOut=${loggedOut}`);
       if (!loggedOut) {
-        startSock(); // auto-reconnect, reuses files in AUTH_DIR
+        setTimeout(() => startSock(), 3000); // Auto-reconnect after 3s
       }
     }
   });
 
-  // Initial history sync gives us the chat list AND contact list on first
-  // login/reconnect — process contacts first so chat names resolve right away.
-  sock.ev.on('messaging-history.set', ({ chats: syncedChats, contacts: syncedContacts }) => {
+  // Handle Full History Sync: Process contacts, chats, and past messages
+  sock.ev.on('messaging-history.set', ({ chats: syncedChats, contacts: syncedContacts, messages: syncedMessages, isLatest }) => {
+    console.log(`[History Sync] Synced ${syncedChats?.length || 0} chats, ${syncedContacts?.length || 0} contacts, ${syncedMessages?.length || 0} past messages. isLatest: ${Boolean(isLatest)}`);
+    
     (syncedContacts || []).forEach(upsertContact);
-    (syncedChats || []).forEach(upsertChat);
+    (syncedChats || []).forEach((c) => upsertChat(c, true));
+
+    // Process historical messages (isHistorySync = true avoids incrementing unreadCount)
+    if (Array.isArray(syncedMessages) && syncedMessages.length > 0) {
+      const sorted = [...syncedMessages].sort((a, b) => parseTimestamp(a.messageTimestamp) - parseTimestamp(b.messageTimestamp));
+      sorted.forEach((msg) => recordMessage(msg, true));
+    }
+    reResolveAllChatNames();
   });
 
   sock.ev.on('contacts.upsert', (newContacts) => {
     (newContacts || []).forEach(upsertContact);
-    // Re-resolve names for chats we already know about, in case the
-    // contact synced after the chat did.
-    newContacts.forEach((c) => {
-      if (chats.has(c.id)) {
-        const chat = chats.get(c.id);
-        chat.name = resolveName(c.id, chat.name);
-        chats.set(c.id, chat);
-      }
-    });
+    reResolveAllChatNames();
   });
 
   sock.ev.on('contacts.update', (updates) => {
     (updates || []).forEach((u) => upsertContact({ id: u.id, ...u }));
+    reResolveAllChatNames();
   });
 
   sock.ev.on('chats.upsert', (newChats) => {
-    (newChats || []).forEach(upsertChat);
+    (newChats || []).forEach((c) => upsertChat(c, false));
   });
 
   sock.ev.on('chats.update', (updates) => {
-    (updates || []).forEach((u) => upsertChat({ id: u.id, ...u }));
+    (updates || []).forEach((u) => upsertChat({ id: u.id, ...u }, false));
   });
 
-  sock.ev.on('messages.upsert', ({ messages: msgs }) => {
-    (msgs || []).forEach(recordMessage);
+  sock.ev.on('messages.upsert', ({ messages: msgs, type }) => {
+    // Only process notify or append messages
+    (msgs || []).forEach((m) => recordMessage(m, false));
   });
 }
 
-// ---------- Routes ----------
+// ---------- Express Middleware & Routes ----------
+app.use(express.json({ limit: '16mb' }));
+app.use(express.urlencoded({ extended: true, limit: '16mb' }));
 
-app.use(express.json());
-
-app.get('/health', (req, res) => {
-  res.json({ status: connectionStatus });
+// CORS headers for client flexibility
+app.use((req, res, next) => {
+  res.header('Access-Control-Allow-Origin', '*');
+  res.header('Access-Control-Allow-Methods', 'GET, POST, OPTIONS');
+  res.header('Access-Control-Allow-Headers', 'Content-Type, Authorization');
+  if (req.method === 'OPTIONS') {
+    return res.sendStatus(200);
+  }
+  next();
 });
 
+// 1. Health Status Endpoint (used by J2ME client & Uptime monitors)
+app.get('/health', (req, res) => {
+  res.json({
+    status: connectionStatus,
+    user: sock?.user?.id || null,
+    totalChats: chats.size,
+    totalContacts: contacts.size,
+  });
+});
+
+// 2. QR JSON Endpoint (returns base64 data URL string)
 app.get('/qr', async (req, res) => {
   if (connectionStatus === 'connected') {
     return res.json({ status: 'connected', qr: null });
@@ -200,10 +304,7 @@ app.get('/qr', async (req, res) => {
   res.json({ status: 'qr', qr: dataUrl });
 });
 
-// Browser-friendly version: open this URL directly and it renders an
-// actual scannable QR image, instead of the raw data-URL text /qr returns.
-// Also used directly by the J2ME client — MIDP's Image.createImage()
-// decodes PNG natively, so the phone can fetch this with no base64 step.
+// 3. QR Image Endpoint (serves raw PNG binary for J2ME Image.createImage and browsers)
 app.get('/qr-image', (req, res) => {
   if (connectionStatus === 'connected') {
     return res.status(404).send('Already connected — no QR to show.');
@@ -212,11 +313,13 @@ app.get('/qr-image', (req, res) => {
     return res.status(404).send('No QR yet — refresh in a few seconds.');
   }
   let size = parseInt(req.query.size, 10);
-  if (!size || size < 80 || size > 500) size = 300;
+  if (!size || size < 80 || size > 500) size = 180;
+
   res.type('png');
   QRCode.toFileStream(res, latestQR, { width: size });
 });
 
+// 4. List All Chats (sorted by recency descending)
 app.get('/chats', (req, res) => {
   if (connectionStatus !== 'connected') {
     return res.status(503).json({ error: `Not connected (status: ${connectionStatus})` });
@@ -227,36 +330,130 @@ app.get('/chats', (req, res) => {
   res.json(list);
 });
 
+// 5. Get Messages for a Chat (resets unreadCount, returns chronological array)
 app.get('/messages/:jid', (req, res) => {
   const jid = decodeURIComponent(req.params.jid);
-  // Fetching a chat's messages counts as reading it — clear the unread
-  // badge for this jid so /chats reflects it on the next call.
   const chat = chats.get(jid);
   if (chat) {
     chat.unreadCount = 0;
     chats.set(jid, chat);
   }
-  res.json(messages.get(jid) || []);
+  const list = (messages.get(jid) || []).map(({ rawMsg, ...rest }) => rest);
+  res.json(list);
 });
 
-app.post('/send', async (req, res) => {
-  const { jid, text } = req.body || {};
+// 6. Media Download Endpoint (streams image/video/audio binary to J2ME client or browser)
+app.get('/messages/:jid/:msgId/media', async (req, res) => {
   if (!sock || connectionStatus !== 'connected') {
-    return res.status(503).json({ error: 'Not connected' });
+    return res.status(503).send('Not connected to WhatsApp');
   }
-  if (!jid || !text) {
-    return res.status(400).json({ error: 'jid and text are required' });
+  const jid = decodeURIComponent(req.params.jid);
+  const msgId = decodeURIComponent(req.params.msgId);
+
+  const list = messages.get(jid) || [];
+  const msgObj = list.find((m) => m.id === msgId);
+  if (!msgObj || !msgObj.rawMsg) {
+    return res.status(404).send('Media message not found or raw payload evicted');
+  }
+
+  try {
+    const buffer = await downloadMediaMessage(
+      msgObj.rawMsg,
+      'buffer',
+      {},
+      {
+        logger: pino({ level: 'silent' }),
+        reuploadRequest: sock.updateMediaMessage,
+      }
+    );
+
+    if (msgObj.mediaType === 'image') {
+      res.type('image/jpeg');
+    } else if (msgObj.mediaType === 'video') {
+      res.type('video/mp4');
+    } else if (msgObj.mediaType === 'audio') {
+      res.type('audio/ogg');
+    } else {
+      res.type('application/octet-stream');
+    }
+    res.send(buffer);
+  } catch (err) {
+    console.error(`[Media Download Error] ${err.message}`);
+    res.status(500).send('Failed to download media from WhatsApp');
+  }
+});
+
+// 7. Send Message (supports JSON with text OR base64 media for J2ME CLDC/MIDP)
+app.post('/send', async (req, res) => {
+  const { jid, text, caption, mediaType, mediaBase64 } = req.body || {};
+  if (!sock || connectionStatus !== 'connected') {
+    return res.status(503).json({ error: `Not connected (status: ${connectionStatus})` });
+  }
+  if (!jid) {
+    return res.status(400).json({ error: 'jid is required' });
+  }
+
+  try {
+    let result;
+    if (mediaBase64 && mediaType) {
+      const buffer = Buffer.from(mediaBase64, 'base64');
+      if (mediaType === 'image') {
+        result = await sock.sendMessage(jid, { image: buffer, caption: caption || text || '' });
+      } else if (mediaType === 'video') {
+        result = await sock.sendMessage(jid, { video: buffer, caption: caption || text || '' });
+      } else if (mediaType === 'audio') {
+        result = await sock.sendMessage(jid, { audio: buffer, mimetype: 'audio/mp4' });
+      } else {
+        return res.status(400).json({ error: 'Unsupported mediaType. Use image, video, or audio.' });
+      }
+    } else if (text) {
+      result = await sock.sendMessage(jid, { text });
+    } else {
+      return res.status(400).json({ error: 'Either text or mediaBase64+mediaType is required' });
+    }
+    res.json({ ok: true, id: result?.key?.id });
+  } catch (err) {
+    console.error('[Send Message Error]:', err);
+    res.status(500).json({ error: err.message });
+  }
+});
+
+// 8. Send Media (Multipart Form-Data for binary file upload)
+const upload = multer({ limits: { fileSize: 16 * 1024 * 1024 } });
+app.post('/send-media', upload.single('file'), async (req, res) => {
+  if (!sock || connectionStatus !== 'connected') {
+    return res.status(503).json({ error: 'Not connected to WhatsApp' });
+  }
+  const { jid, caption, mediaType } = req.body || {};
+  const file = req.file;
+  if (!jid || !file) {
+    return res.status(400).json({ error: 'jid and file are required' });
   }
   try {
-    await sock.sendMessage(jid, { text });
-    res.json({ ok: true });
+    const type = mediaType || (file.mimetype.startsWith('video') ? 'video' : file.mimetype.startsWith('audio') ? 'audio' : 'image');
+    let payload = {};
+    if (type === 'image') {
+      payload = { image: file.buffer, caption: caption || '' };
+    } else if (type === 'video') {
+      payload = { video: file.buffer, caption: caption || '' };
+    } else if (type === 'audio') {
+      payload = { audio: file.buffer, mimetype: file.mimetype || 'audio/mp4' };
+    } else {
+      payload = { document: file.buffer, fileName: file.originalname, mimetype: file.mimetype };
+    }
+    const result = await sock.sendMessage(jid, payload);
+    res.json({ ok: true, id: result?.key?.id });
   } catch (err) {
+    console.error('[Send Media Error]:', err);
     res.status(500).json({ error: err.message });
   }
 });
 
 // ---------- Boot ----------
-
 startSock().then(() => {
-  app.listen(PORT, () => console.log(`Server listening on port ${PORT}`));
+  app.listen(PORT, () => {
+    console.log(`[Server] WhatsApp Baileys backend listening on port ${PORT}`);
+  });
+}).catch((err) => {
+  console.error('[Server Boot Error]:', err);
 });
