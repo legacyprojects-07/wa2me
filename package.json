@@ -1,7 +1,7 @@
 {
   "name": "whatsapp-nokia-backend",
   "version": "1.0.0",
-  "description": "Baileys WhatsApp backend for a J2ME Nokia thin client",
+  "description": "Baileys WhatsApp backend for a J2ME Nokia thin client with media support and past chat history sync",
   "main": "index.js",
   "type": "commonjs",
   "scripts": {
@@ -16,6 +16,7 @@
     "express": "^4.19.2",
     "qrcode": "^1.5.3",
     "pino": "^9.3.2",
-    "dotenv": "^16.4.5"
+    "dotenv": "^16.4.5",
+    "multer": "^1.4.5-lts.1"
   }
 }
