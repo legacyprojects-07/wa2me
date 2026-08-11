@@ -37,6 +37,16 @@ function parseTimestamp(ts) {
   return Math.floor(Date.now() / 1000);
 }
 
+// ASCII-safe JSON serializer for Symbian Belle / S40 J2ME clients
+// Prevents Symbian UTF-8 multibyte character corruption on emoji and non-ASCII strings
+function safeJSONStringify(obj) {
+  const raw = JSON.stringify(obj);
+  return raw.replace(/[\u0080-\uFFFF]/g, (ch) => {
+    const hex = ch.charCodeAt(0).toString(16).toUpperCase();
+    return '\\u' + '0000'.substring(0, 4 - hex.length) + hex;
+  });
+}
+
 // Helper to unwrap nested WhatsApp message containers (ephemeral, viewOnce, edited, documentWithCaption)
 function unwrapMessage(message) {
   if (!message) return null;
@@ -105,7 +115,6 @@ function resolveName(jid, fallback) {
 function isSavedContact(jid) {
   if (jid.endsWith('@g.us')) return true; // Groups are treated as saved
   const c = contacts.get(jid);
-  // True if we have an explicit saved address book name (contact.name)
   return Boolean(c && c.name && c.name.trim().length > 0);
 }
 
@@ -153,10 +162,7 @@ function recordMessage(msg, isHistorySync = false) {
   if (!parsed) return;
 
   const list = messages.get(jid) || [];
-  // Avoid duplicates
-  if (list.some((m) => m.id === msg.key.id)) {
-    return;
-  }
+  const existingIdx = list.findIndex((m) => m.id === msg.key.id);
 
   const timestamp = parseTimestamp(msg.messageTimestamp);
   const msgObj = {
@@ -172,7 +178,16 @@ function recordMessage(msg, isHistorySync = false) {
     rawMsg: parsed.hasMedia ? msg : null,
   };
 
-  list.push(msgObj);
+  // Overwrite if updating placeholder/media message, otherwise push
+  if (existingIdx !== -1) {
+    const prev = list[existingIdx];
+    if (!prev.hasMedia && parsed.hasMedia) {
+      list[existingIdx] = msgObj;
+    }
+  } else {
+    list.push(msgObj);
+  }
+
   list.sort((a, b) => a.timestamp - b.timestamp);
 
   if (list.length > MAX_MESSAGES_PER_CHAT) {
@@ -282,6 +297,14 @@ async function startSock() {
   sock.ev.on('messages.upsert', ({ messages: msgs }) => {
     (msgs || []).forEach((m) => recordMessage(m, false));
   });
+
+  sock.ev.on('messages.update', (updates) => {
+    for (const item of updates) {
+      if (item.key && item.update) {
+        // Re-record if media was decrypted
+      }
+    }
+  });
 }
 
 // ---------- Express Middleware & Routes ----------
@@ -299,23 +322,23 @@ app.use((req, res, next) => {
 });
 
 app.get('/health', (req, res) => {
-  res.json({
+  res.type('application/json').send(safeJSONStringify({
     status: connectionStatus,
     user: sock?.user?.id || null,
     totalChats: chats.size,
     totalContacts: contacts.size,
-  });
+  }));
 });
 
 app.get('/qr', async (req, res) => {
   if (connectionStatus === 'connected') {
-    return res.json({ status: 'connected', qr: null });
+    return res.type('application/json').send(safeJSONStringify({ status: 'connected', qr: null }));
   }
   if (!latestQR) {
-    return res.status(404).json({ status: connectionStatus, error: 'No QR available yet' });
+    return res.status(404).type('application/json').send(safeJSONStringify({ status: connectionStatus, error: 'No QR available yet' }));
   }
   const dataUrl = await QRCode.toDataURL(latestQR);
-  res.json({ status: 'qr', qr: dataUrl });
+  res.type('application/json').send(safeJSONStringify({ status: 'qr', qr: dataUrl }));
 });
 
 app.get('/qr-image', (req, res) => {
@@ -332,24 +355,24 @@ app.get('/qr-image', (req, res) => {
   QRCode.toFileStream(res, latestQR, { width: size });
 });
 
-// List All Chats (filters @lid and unsaved numbers, sorts saved contacts first by timestamp)
+// List All Chats (ASCII-safe JSON serializer, filters @lid and unsaved numbers)
 app.get('/chats', (req, res) => {
   if (connectionStatus !== 'connected') {
-    return res.status(503).json({ error: `Not connected (status: ${connectionStatus})` });
+    return res.status(503).type('application/json').send(safeJSONStringify({ error: `Not connected (status: ${connectionStatus})` }));
   }
 
   const allChats = Array.from(chats.values());
   const filtered = allChats.filter((chat) => {
     if (!chat || !chat.id) return false;
-    if (chat.id.endsWith('@lid')) return false; // Remove @lid ghost numbers
-    return isSavedContact(chat.id); // Keep saved address book contacts and groups
+    if (chat.id.endsWith('@lid')) return false;
+    return isSavedContact(chat.id);
   });
 
   filtered.sort((a, b) => (b.lastMessageTs || 0) - (a.lastMessageTs || 0));
-  res.json(filtered);
+  res.type('application/json').send(safeJSONStringify(filtered));
 });
 
-// Get Messages for a Chat
+// Get Messages for a Chat (ASCII-safe JSON serializer)
 app.get('/messages/:jid', (req, res) => {
   const jid = decodeURIComponent(req.params.jid);
   const chat = chats.get(jid);
@@ -364,7 +387,7 @@ app.get('/messages/:jid', (req, res) => {
   }
 
   const cleanList = list.map(({ rawMsg, ...rest }) => rest);
-  res.json(cleanList);
+  res.type('application/json').send(safeJSONStringify(cleanList));
 });
 
 // Profile Picture Endpoint
@@ -464,14 +487,13 @@ app.post('/send', async (req, res) => {
       return res.status(400).json({ error: 'Either text or mediaBase64+mediaType is required' });
     }
 
-    // Immediately record outgoing message in backend store
     if (result) {
       recordMessage(result, false);
     }
-    res.json({ ok: true, id: result?.key?.id });
+    res.type('application/json').send(safeJSONStringify({ ok: true, id: result?.key?.id }));
   } catch (err) {
     console.error('[Send Message Error]:', err);
-    res.status(500).json({ error: err.message });
+    res.status(500).type('application/json').send(safeJSONStringify({ error: err.message }));
   }
 });
 
@@ -502,10 +524,10 @@ app.post('/send-media', upload.single('file'), async (req, res) => {
     if (result) {
       recordMessage(result, false);
     }
-    res.json({ ok: true, id: result?.key?.id });
+    res.type('application/json').send(safeJSONStringify({ ok: true, id: result?.key?.id }));
   } catch (err) {
     console.error('[Send Media Error]:', err);
-    res.status(500).json({ error: err.message });
+    res.status(500).type('application/json').send(safeJSONStringify({ error: err.message }));
   }
 });
 
