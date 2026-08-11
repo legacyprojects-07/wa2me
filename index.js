@@ -23,7 +23,6 @@ let connectionStatus = 'starting'; // starting | qr | connected | disconnected |
 const chats = new Map(); // jid -> { id, name, unreadCount, lastMessageTs }
 const contacts = new Map(); // jid -> { name, notify, phoneNumber, lid }
 const messages = new Map(); // jid -> array of recent messages (capped)
-const presenceMap = new Map(); // jid -> { status: 'online' | 'offline' | 'typing', lastSeen: UNIX seconds }
 const MAX_MESSAGES_PER_CHAT = 500;
 const pendingHistoryRequests = new Set();
 
@@ -52,7 +51,7 @@ function unwrapMessage(message) {
 // Helper to extract text and media type from any WhatsApp message payload
 function parseMessageContent(msg) {
   const content = unwrapMessage(msg.message);
-  if (!content) return { text: null, mediaType: null, hasMedia: false };
+  if (!content) return { text: '[Message]', mediaType: null, hasMedia: false };
 
   let text = null;
   let mediaType = null;
@@ -154,6 +153,7 @@ function recordMessage(msg, isHistorySync = false) {
   if (!parsed) return;
 
   const list = messages.get(jid) || [];
+  // Avoid duplicates
   if (list.some((m) => m.id === msg.key.id)) {
     return;
   }
@@ -209,7 +209,7 @@ async function triggerOnDemandHistorySync(jid) {
   } catch (err) {
     console.log(`[History Sync] On-demand history fetch failed for ${jid}: ${err.message}`);
   } finally {
-    setTimeout(() => pendingHistoryRequests.delete(jid), 15000); // 15s cooldown
+    setTimeout(() => pendingHistoryRequests.delete(jid), 15000);
   }
 }
 
@@ -250,9 +250,7 @@ async function startSock() {
     }
   });
 
-  sock.ev.on('messaging-history.set', ({ chats: syncedChats, contacts: syncedContacts, messages: syncedMessages, isLatest }) => {
-    console.log(`[History Sync] Synced ${syncedChats?.length || 0} chats, ${syncedContacts?.length || 0} contacts, ${syncedMessages?.length || 0} past messages.`);
-    
+  sock.ev.on('messaging-history.set', ({ chats: syncedChats, contacts: syncedContacts, messages: syncedMessages }) => {
     (syncedContacts || []).forEach(upsertContact);
     (syncedChats || []).forEach((c) => upsertChat(c, true));
 
@@ -283,24 +281,6 @@ async function startSock() {
 
   sock.ev.on('messages.upsert', ({ messages: msgs }) => {
     (msgs || []).forEach((m) => recordMessage(m, false));
-  });
-
-  // Track live presence updates for online/last-seen status
-  sock.ev.on('presence.update', (update) => {
-    const jid = update.id;
-    if (!jid) return;
-    const pres = update.presences || {};
-    let isOnline = false;
-    for (const key in pres) {
-      const state = pres[key]?.lastKnownPresence;
-      if (state === 'available' || state === 'composing') {
-        isOnline = true;
-      }
-    }
-    presenceMap.set(jid, {
-      status: isOnline ? 'online' : 'offline',
-      lastSeen: Math.floor(Date.now() / 1000),
-    });
   });
 }
 
@@ -387,7 +367,7 @@ app.get('/messages/:jid', (req, res) => {
   res.json(cleanList);
 });
 
-// Profile Picture Endpoint (Streams JPEG avatar from Baileys)
+// Profile Picture Endpoint
 app.get('/profile-pic/:jid', async (req, res) => {
   if (!sock || connectionStatus !== 'connected') {
     return res.status(503).send('Not connected');
@@ -404,18 +384,6 @@ app.get('/profile-pic/:jid', async (req, res) => {
   } catch (err) {
     res.status(404).send('Profile picture unavailable');
   }
-});
-
-// Presence / Last Seen Endpoint
-app.get('/presence/:jid', async (req, res) => {
-  const jid = decodeURIComponent(req.params.jid);
-  if (sock && connectionStatus === 'connected') {
-    try {
-      await sock.presenceSubscribe(jid);
-    } catch (e) {}
-  }
-  const info = presenceMap.get(jid) || { jid, status: 'offline', lastSeen: 0 };
-  res.json(info);
 });
 
 // Media Download Endpoint with jpegThumbnail fallback for historical/expired photos
@@ -467,6 +435,7 @@ app.get('/messages/:jid/:msgId/media', async (req, res) => {
 });
 
 // Send Message (supports JSON with text OR base64 media for J2ME CLDC/MIDP)
+// IMMEDIATELY RECORDS SENT MESSAGE IN BACKEND STORE
 app.post('/send', async (req, res) => {
   const { jid, text, caption, mediaType, mediaBase64 } = req.body || {};
   if (!sock || connectionStatus !== 'connected') {
@@ -493,6 +462,11 @@ app.post('/send', async (req, res) => {
       result = await sock.sendMessage(jid, { text });
     } else {
       return res.status(400).json({ error: 'Either text or mediaBase64+mediaType is required' });
+    }
+
+    // Immediately record outgoing message in backend store
+    if (result) {
+      recordMessage(result, false);
     }
     res.json({ ok: true, id: result?.key?.id });
   } catch (err) {
@@ -525,6 +499,9 @@ app.post('/send-media', upload.single('file'), async (req, res) => {
       payload = { document: file.buffer, fileName: file.originalname, mimetype: file.mimetype };
     }
     const result = await sock.sendMessage(jid, payload);
+    if (result) {
+      recordMessage(result, false);
+    }
     res.json({ ok: true, id: result?.key?.id });
   } catch (err) {
     console.error('[Send Media Error]:', err);
