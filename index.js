@@ -23,8 +23,9 @@ let connectionStatus = 'starting'; // starting | qr | connected | disconnected |
 const chats = new Map(); // jid -> { id, name, unreadCount, lastMessageTs }
 const contacts = new Map(); // jid -> { name, notify, phoneNumber, lid }
 const messages = new Map(); // jid -> array of recent messages (capped)
-const MAX_MESSAGES_PER_CHAT = 500; // Increased to 500 messages per chat
-const pendingHistoryRequests = new Set(); // Track on-demand history syncs
+const presenceMap = new Map(); // jid -> { status: 'online' | 'offline' | 'typing', lastSeen: UNIX seconds }
+const MAX_MESSAGES_PER_CHAT = 500;
+const pendingHistoryRequests = new Set();
 
 // Helper to reliably parse Baileys timestamps (handles numbers, strings, and protobuf Long objects)
 function parseTimestamp(ts) {
@@ -283,6 +284,24 @@ async function startSock() {
   sock.ev.on('messages.upsert', ({ messages: msgs }) => {
     (msgs || []).forEach((m) => recordMessage(m, false));
   });
+
+  // Track live presence updates for online/last-seen status
+  sock.ev.on('presence.update', (update) => {
+    const jid = update.id;
+    if (!jid) return;
+    const pres = update.presences || {};
+    let isOnline = false;
+    for (const key in pres) {
+      const state = pres[key]?.lastKnownPresence;
+      if (state === 'available' || state === 'composing') {
+        isOnline = true;
+      }
+    }
+    presenceMap.set(jid, {
+      status: isOnline ? 'online' : 'offline',
+      lastSeen: Math.floor(Date.now() / 1000),
+    });
+  });
 }
 
 // ---------- Express Middleware & Routes ----------
@@ -333,32 +352,24 @@ app.get('/qr-image', (req, res) => {
   QRCode.toFileStream(res, latestQR, { width: size });
 });
 
-// List All Chats:
-// 1. Removes @lid ghost numbers
-// 2. Removes unsaved contacts (keeps saved address book contacts and groups)
-// 3. Prioritizes saved contacts sorted by recent message timestamp descending
+// List All Chats (filters @lid and unsaved numbers, sorts saved contacts first by timestamp)
 app.get('/chats', (req, res) => {
   if (connectionStatus !== 'connected') {
     return res.status(503).json({ error: `Not connected (status: ${connectionStatus})` });
   }
 
   const allChats = Array.from(chats.values());
-
   const filtered = allChats.filter((chat) => {
     if (!chat || !chat.id) return false;
-    // Remove @lid ghost numbers
-    if (chat.id.endsWith('@lid')) return false;
-    // Remove unsaved numbers (keep only saved address-book names and group chats)
-    return isSavedContact(chat.id);
+    if (chat.id.endsWith('@lid')) return false; // Remove @lid ghost numbers
+    return isSavedContact(chat.id); // Keep saved address book contacts and groups
   });
 
-  // Sort by lastMessageTs descending (highest priority saved contacts with recent messages first)
   filtered.sort((a, b) => (b.lastMessageTs || 0) - (a.lastMessageTs || 0));
-
   res.json(filtered);
 });
 
-// Get Messages for a Chat (resets unreadCount, returns chronological array, triggers history sync if needed)
+// Get Messages for a Chat
 app.get('/messages/:jid', (req, res) => {
   const jid = decodeURIComponent(req.params.jid);
   const chat = chats.get(jid);
@@ -368,13 +379,43 @@ app.get('/messages/:jid', (req, res) => {
   }
 
   const list = messages.get(jid) || [];
-  // If we only have a few messages, request older history on-demand in the background
   if (list.length > 0 && list.length <= 10) {
     triggerOnDemandHistorySync(jid);
   }
 
   const cleanList = list.map(({ rawMsg, ...rest }) => rest);
   res.json(cleanList);
+});
+
+// Profile Picture Endpoint (Streams JPEG avatar from Baileys)
+app.get('/profile-pic/:jid', async (req, res) => {
+  if (!sock || connectionStatus !== 'connected') {
+    return res.status(503).send('Not connected');
+  }
+  const jid = decodeURIComponent(req.params.jid);
+  try {
+    const url = await sock.profilePictureUrl(jid, 'image');
+    if (!url) return res.status(404).send('No profile picture available');
+    const response = await fetch(url);
+    if (!response.ok) return res.status(404).send('Failed to download profile picture');
+    const arrayBuf = await response.arrayBuffer();
+    res.type('image/jpeg');
+    return res.send(Buffer.from(arrayBuf));
+  } catch (err) {
+    res.status(404).send('Profile picture unavailable');
+  }
+});
+
+// Presence / Last Seen Endpoint
+app.get('/presence/:jid', async (req, res) => {
+  const jid = decodeURIComponent(req.params.jid);
+  if (sock && connectionStatus === 'connected') {
+    try {
+      await sock.presenceSubscribe(jid);
+    } catch (e) {}
+  }
+  const info = presenceMap.get(jid) || { jid, status: 'offline', lastSeen: 0 };
+  res.json(info);
 });
 
 // Media Download Endpoint with jpegThumbnail fallback for historical/expired photos
@@ -392,7 +433,6 @@ app.get('/messages/:jid/:msgId/media', async (req, res) => {
   }
 
   try {
-    // Attempt primary high-res download
     const buffer = await downloadMediaMessage(
       msgObj.rawMsg,
       'buffer',
@@ -415,7 +455,6 @@ app.get('/messages/:jid/:msgId/media', async (req, res) => {
     return res.send(buffer);
   } catch (err) {
     console.warn(`[Media Download Warning] High-res download failed (${err.message}). Using jpegThumbnail fallback...`);
-    // Fallback: Extract embedded jpegThumbnail from protobuf imageMessage/videoMessage
     const content = unwrapMessage(msgObj.rawMsg?.message);
     const thumb = content?.imageMessage?.jpegThumbnail || content?.videoMessage?.jpegThumbnail;
     if (thumb) {
