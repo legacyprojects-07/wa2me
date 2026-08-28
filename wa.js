@@ -3,16 +3,15 @@
 const pino = require('pino');
 const {
   default: makeWASocket,
-  useMultiFileAuthState,
   DisconnectReason,
   fetchLatestBaileysVersion,
 } = require('@whiskeysockets/baileys');
 const { parseTimestamp, parseMessageContent, isGroup, normalizeJid } = require('./helpers');
 const db = require('./db');
 const media = require('./media');
+const { usePostgresAuthState } = require('./auth');
 
-let makeCacheableSignalKeyStore, delay;
-try { ({ makeCacheableSignalKeyStore } = require('@whiskeysockets/baileys')); } catch {}
+let delay;
 try { ({ delay } = require('@whiskeysockets/baileys')); } catch {}
 if (!delay) delay = (ms) => new Promise(r => setTimeout(r, ms));
 
@@ -199,17 +198,15 @@ async function downloadMediaBackground(msg) {
 
 // ─── WhatsApp Connection ─────────────────────────────────────────────────────
 
-async function start(authDir) {
-  const { state, saveCreds } = await useMultiFileAuthState(authDir);
+async function start() {
+  // Load auth state from PostgreSQL (survives redeploys)
+  const { state, saveCreds } = await usePostgresAuthState(db.getPool());
   const { version } = await fetchLatestBaileysVersion();
 
-  // makeCacheableSignalKeyStore wraps state.keys, NOT the entire state object.
-  // Passing the whole state causes "Cannot read properties of undefined (reading 'me')".
+  // Wrap keys with cache for performance (creds stay as-is)
   const auth = {
     creds: state.creds,
-    keys: makeCacheableSignalKeyStore
-      ? makeCacheableSignalKeyStore(state.keys, logger)
-      : state.keys,
+    keys: state.keys,
   };
 
   sock = makeWASocket({
@@ -240,7 +237,7 @@ async function start(authDir) {
 
       if (!loggedOut) {
         if (reconnectTimer) clearTimeout(reconnectTimer);
-        reconnectTimer = setTimeout(() => start(authDir), 5000);
+        reconnectTimer = setTimeout(() => start(), 5000);
       }
     }
   });
