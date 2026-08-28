@@ -2,9 +2,9 @@
   "name": "whatsapp-nokia-backend",
   "version": "4.0.0",
   "description": "Baileys WhatsApp backend for Qt/Symbian — Render PostgreSQL + presence tracking",
-  "main": "server.js",
+  "main": "index.js",
   "scripts": {
-    "start": "node server.js"
+    "start": "node index.js"
   },
   "engines": {
     "node": ">=18.0.0"
