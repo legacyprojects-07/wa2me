@@ -1,48 +1,66 @@
 'use strict';
 
-const Database = require('better-sqlite3');
-const path = require('path');
-const fs = require('fs');
+const { Pool } = require('pg');
 
-let db;
+let pool;
 
-function init(dbPath) {
-  const dir = path.dirname(dbPath);
-  if (!fs.existsSync(dir)) fs.mkdirSync(dir, { recursive: true });
+/**
+ * Initialize PostgreSQL connection pool.
+ * Expects DATABASE_URL env var (auto-set by Render when linked to a PostgreSQL service).
+ */
+async function init() {
+  const connectionString = process.env.DATABASE_URL;
+  if (!connectionString) throw new Error('DATABASE_URL environment variable is required');
 
-  db = new Database(dbPath);
-  db.pragma('journal_mode = WAL');
-  db.pragma('synchronous = NORMAL');
-  db.pragma('foreign_keys = ON');
-  migrate();
-  return db;
+  // Render internal connections don't need SSL; external (Neon, etc.) do.
+  // Detect by checking if hostname contains 'render' or 'internal'.
+  const needsSSL = !connectionString.includes('internal') && !connectionString.includes('render');
+
+  pool = new Pool({
+    connectionString,
+    ssl: needsSSL ? { rejectUnauthorized: false } : false,
+    max: 5,
+    idleTimeoutMillis: 30000,
+    connectionTimeoutMillis: 15000,
+  });
+
+  pool.on('error', (err) => {
+    console.error('[DB] Pool error:', err.message);
+  });
+
+  // Test connection
+  const client = await pool.connect();
+  console.log('[DB] Connected to PostgreSQL');
+  client.release();
+
+  await migrate();
 }
 
-function getDb() {
-  if (!db) throw new Error('Database not initialized');
-  return db;
+function getPool() {
+  if (!pool) throw new Error('Database not initialized');
+  return pool;
 }
 
-function close() {
-  if (db) {
-    db.close();
-    db = null;
+async function close() {
+  if (pool) {
+    await pool.end();
+    pool = null;
   }
 }
 
 // ─── Schema ──────────────────────────────────────────────────────────────────
 
-function migrate() {
-  db.exec(`
+async function migrate() {
+  await pool.query(`
     CREATE TABLE IF NOT EXISTS chats (
       jid             TEXT PRIMARY KEY,
       name            TEXT NOT NULL DEFAULT '',
-      is_group        INTEGER NOT NULL DEFAULT 0,
+      is_group        BOOLEAN NOT NULL DEFAULT FALSE,
       unread_count    INTEGER NOT NULL DEFAULT 0,
-      last_message_ts INTEGER NOT NULL DEFAULT 0,
+      last_message_ts BIGINT NOT NULL DEFAULT 0,
       last_message    TEXT NOT NULL DEFAULT '',
-      created_at      TEXT NOT NULL DEFAULT (datetime('now')),
-      updated_at      TEXT NOT NULL DEFAULT (datetime('now'))
+      created_at      TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+      updated_at      TIMESTAMPTZ NOT NULL DEFAULT NOW()
     );
 
     CREATE TABLE IF NOT EXISTS contacts (
@@ -50,8 +68,8 @@ function migrate() {
       name         TEXT NOT NULL DEFAULT '',
       notify       TEXT NOT NULL DEFAULT '',
       phone_number TEXT NOT NULL DEFAULT '',
-      is_saved     INTEGER NOT NULL DEFAULT 0,
-      updated_at   TEXT NOT NULL DEFAULT (datetime('now'))
+      is_saved     BOOLEAN NOT NULL DEFAULT FALSE,
+      updated_at   TIMESTAMPTZ NOT NULL DEFAULT NOW()
     );
 
     CREATE TABLE IF NOT EXISTS messages (
@@ -59,57 +77,52 @@ function migrate() {
       chat_jid     TEXT NOT NULL,
       sender_jid   TEXT NOT NULL DEFAULT '',
       sender_name  TEXT NOT NULL DEFAULT '',
-      from_me      INTEGER NOT NULL DEFAULT 0,
-      timestamp    INTEGER NOT NULL DEFAULT 0,
+      from_me      BOOLEAN NOT NULL DEFAULT FALSE,
+      timestamp    BIGINT NOT NULL DEFAULT 0,
       text         TEXT NOT NULL DEFAULT '',
       media_type   TEXT,
-      has_media    INTEGER NOT NULL DEFAULT 0,
+      has_media    BOOLEAN NOT NULL DEFAULT FALSE,
       media_path   TEXT,
       media_mime   TEXT,
       status       TEXT NOT NULL DEFAULT 'received',
-      created_at   TEXT NOT NULL DEFAULT (datetime('now')),
+      created_at   TIMESTAMPTZ NOT NULL DEFAULT NOW(),
       PRIMARY KEY (chat_jid, id)
     );
 
     CREATE INDEX IF NOT EXISTS idx_messages_chat_ts ON messages(chat_jid, timestamp);
     CREATE INDEX IF NOT EXISTS idx_chats_last_ts ON chats(last_message_ts DESC);
   `);
+  console.log('[DB] Schema migrated');
 }
 
 // ─── Contacts ────────────────────────────────────────────────────────────────
 
-const UPSERT_CONTACT = `
-  INSERT INTO contacts (jid, name, notify, phone_number, is_saved, updated_at)
-  VALUES (@jid, @name, @notify, @phone_number, @is_saved, datetime('now'))
-  ON CONFLICT(jid) DO UPDATE SET
-    name         = COALESCE(NULLIF(@name, ''), contacts.name),
-    notify       = COALESCE(NULLIF(@notify, ''), contacts.notify),
-    phone_number = COALESCE(NULLIF(@phone_number, ''), contacts.phone_number),
-    is_saved     = CASE WHEN @is_saved = 1 THEN 1 ELSE contacts.is_saved END,
-    updated_at   = datetime('now')
-`;
-
-function upsertContact(c) {
+async function upsertContact(c) {
   if (!c || !c.id) return;
-  db.prepare(UPSERT_CONTACT).run({
-    jid: c.id,
-    name: c.name || '',
-    notify: c.notify || '',
-    phone_number: c.phoneNumber || '',
-    is_saved: c.isSaved ? 1 : 0,
-  });
+  await pool.query(`
+    INSERT INTO contacts (jid, name, notify, phone_number, is_saved, updated_at)
+    VALUES ($1, $2, $3, $4, $5, NOW())
+    ON CONFLICT(jid) DO UPDATE SET
+      name         = COALESCE(NULLIF(EXCLUDED.name, ''), contacts.name),
+      notify       = COALESCE(NULLIF(EXCLUDED.notify, ''), contacts.notify),
+      phone_number = COALESCE(NULLIF(EXCLUDED.phone_number, ''), contacts.phone_number),
+      is_saved     = CASE WHEN EXCLUDED.is_saved THEN TRUE ELSE contacts.is_saved END,
+      updated_at   = NOW()
+  `, [c.id, c.name || '', c.notify || '', c.phoneNumber || '', Boolean(c.isSaved)]);
 }
 
-function getContact(jid) {
-  return db.prepare('SELECT * FROM contacts WHERE jid = ?').get(jid) || null;
+async function getContact(jid) {
+  const { rows } = await pool.query('SELECT * FROM contacts WHERE jid = $1', [jid]);
+  return rows[0] || null;
 }
 
-function getAllContacts() {
-  return db.prepare('SELECT * FROM contacts ORDER BY name').all();
+async function getAllContacts() {
+  const { rows } = await pool.query('SELECT * FROM contacts ORDER BY name');
+  return rows;
 }
 
-function resolveName(jid, fallback) {
-  const c = getContact(jid);
+async function resolveName(jid, fallback) {
+  const c = await getContact(jid);
   if (c) {
     if (c.name && c.name.trim()) return c.name.trim();
     if (c.notify && c.notify.trim()) return c.notify.trim();
@@ -117,63 +130,60 @@ function resolveName(jid, fallback) {
   return fallback || (jid ? jid.replace(/@.*/, '') : '');
 }
 
-function reResolveAllChatNames() {
-  const chats = db.prepare('SELECT jid, name FROM chats').all();
-  const update = db.prepare("UPDATE chats SET name = ?, updated_at = datetime('now') WHERE jid = ?");
-  const tx = db.transaction(() => {
-    for (const chat of chats) {
-      const newName = resolveName(chat.jid, chat.name);
-      if (newName !== chat.name) update.run(newName, chat.jid);
+async function reResolveAllChatNames() {
+  const { rows: chats } = await pool.query('SELECT jid, name FROM chats');
+  for (const chat of chats) {
+    const newName = await resolveName(chat.jid, chat.name);
+    if (newName !== chat.name) {
+      await pool.query("UPDATE chats SET name = $1, updated_at = NOW() WHERE jid = $2", [newName, chat.jid]);
     }
-  });
-  tx();
+  }
 }
 
 // ─── Chats ───────────────────────────────────────────────────────────────────
 
-const UPSERT_CHAT = `
-  INSERT INTO chats (jid, name, is_group, unread_count, last_message_ts, last_message, updated_at)
-  VALUES (@jid, @name, @is_group, @unread_count, @last_message_ts, @last_message, datetime('now'))
-  ON CONFLICT(jid) DO UPDATE SET
-    name            = CASE WHEN @force_name = 1 THEN @name
-                        ELSE COALESCE(NULLIF(@name, ''), chats.name) END,
-    is_group        = @is_group,
-    unread_count    = @unread_count,
-    last_message_ts = MAX(chats.last_message_ts, @last_message_ts),
-    last_message    = CASE WHEN @last_message_ts >= chats.last_message_ts
-                        THEN @last_message ELSE chats.last_message END,
-    updated_at      = datetime('now')
-`;
-
-function upsertChat(chat, { isInitialSync = false, forceName = false } = {}) {
+async function upsertChat(chat, { isInitialSync = false, fromEvent = false, forceName = false } = {}) {
   if (!chat || !chat.id) return;
 
-  const existing = db.prepare('SELECT * FROM chats WHERE jid = ?').get(chat.id);
-  const name = resolveName(chat.id, chat.name || chat.subject || (existing && existing.name) || '');
+  const existing = await getChat(chat.id);
+  const name = await resolveName(chat.id, chat.name || chat.subject || (existing && existing.name) || '');
 
   let unreadCount;
-  if (isInitialSync) {
-    unreadCount = chat.unreadCount ?? (existing ? existing.unread_count : 0);
+  if (isInitialSync || fromEvent) {
+    if (chat.unreadCount !== undefined && chat.unreadCount !== null) {
+      unreadCount = chat.unreadCount;
+    } else if (chat.unread_count !== undefined) {
+      unreadCount = chat.unread_count;
+    } else {
+      unreadCount = existing ? existing.unread_count : 0;
+    }
   } else {
     unreadCount = existing ? existing.unread_count : 0;
   }
 
-  db.prepare(UPSERT_CHAT).run({
-    jid: chat.id,
-    name: name,
-    is_group: isGroup(chat.id) ? 1 : 0,
-    unread_count: unreadCount,
-    last_message_ts: parseTimestamp(chat.conversationTimestamp || chat.lastMessageTs),
-    last_message: chat.lastMessage || '',
-    force_name: forceName ? 1 : 0,
-  });
+  const lastMessageTs = parseTimestamp(chat.conversationTimestamp || chat.lastMessageTs);
+
+  await pool.query(`
+    INSERT INTO chats (jid, name, is_group, unread_count, last_message_ts, last_message, updated_at)
+    VALUES ($1, $2, $3, $4, $5, $6, NOW())
+    ON CONFLICT(jid) DO UPDATE SET
+      name            = CASE WHEN $7 THEN $2
+                          ELSE COALESCE(NULLIF(EXCLUDED.name, ''), chats.name) END,
+      is_group        = EXCLUDED.is_group,
+      unread_count    = EXCLUDED.unread_count,
+      last_message_ts = GREATEST(chats.last_message_ts, EXCLUDED.last_message_ts),
+      last_message    = CASE WHEN EXCLUDED.last_message_ts >= chats.last_message_ts
+                          THEN EXCLUDED.last_message ELSE chats.last_message END,
+      updated_at      = NOW()
+  `, [chat.id, name, isGroup(chat.id), unreadCount, lastMessageTs, chat.lastMessage || '', forceName]);
 }
 
-function getChat(jid) {
-  return db.prepare('SELECT * FROM chats WHERE jid = ?').get(jid) || null;
+async function getChat(jid) {
+  const { rows } = await pool.query('SELECT * FROM chats WHERE jid = $1', [jid]);
+  return rows[0] || null;
 }
 
-function listChats({ savedOnly = true, limit = 200, offset = 0 } = {}) {
+async function listChats({ savedOnly = true, limit = 200, offset = 0 } = {}) {
   let sql = `
     SELECT c.*,
            COALESCE(ct.name, '')   AS contact_name,
@@ -184,82 +194,141 @@ function listChats({ savedOnly = true, limit = 200, offset = 0 } = {}) {
   `;
 
   if (savedOnly) {
-    sql += ` AND (c.is_group = 1 OR (ct.is_saved = 1 OR ct.name != '' OR ct.notify != ''))`;
+    sql += ` AND (c.is_group = TRUE OR ct.is_saved = TRUE OR ct.name != '' OR ct.notify != '')`;
   }
 
-  sql += ` ORDER BY c.last_message_ts DESC LIMIT @limit OFFSET @offset`;
-  return db.prepare(sql).all({ limit, offset });
+  sql += ` ORDER BY c.last_message_ts DESC LIMIT $1 OFFSET $2`;
+  const { rows } = await pool.query(sql, [limit, offset]);
+  return rows;
 }
 
-function setUnreadCount(jid, count) {
-  db.prepare("UPDATE chats SET unread_count = ?, updated_at = datetime('now') WHERE jid = ?")
-    .run(count, jid);
+async function setUnreadCount(jid, count) {
+  await pool.query("UPDATE chats SET unread_count = $1, updated_at = NOW() WHERE jid = $2", [count, jid]);
 }
 
-function incrementUnread(jid) {
-  db.prepare("UPDATE chats SET unread_count = unread_count + 1, updated_at = datetime('now') WHERE jid = ?")
-    .run(jid);
+async function incrementUnread(jid) {
+  await pool.query("UPDATE chats SET unread_count = unread_count + 1, updated_at = NOW() WHERE jid = $1", [jid]);
+}
+
+async function recalculateLastMessage(chatJid) {
+  const { rows } = await pool.query(
+    'SELECT text, media_type, timestamp FROM messages WHERE chat_jid = $1 ORDER BY timestamp DESC LIMIT 1',
+    [chatJid]
+  );
+
+  if (rows.length > 0) {
+    const row = rows[0];
+    const lastMessage = row.text || (row.media_type ? `[${row.media_type}]` : '');
+    await pool.query(
+      "UPDATE chats SET last_message = $1, last_message_ts = $2, updated_at = NOW() WHERE jid = $3",
+      [lastMessage, row.timestamp, chatJid]
+    );
+  } else {
+    await pool.query(
+      "UPDATE chats SET last_message = '', last_message_ts = 0, updated_at = NOW() WHERE jid = $1",
+      [chatJid]
+    );
+  }
 }
 
 // ─── Messages ────────────────────────────────────────────────────────────────
 
-const INSERT_MESSAGE = `
-  INSERT OR IGNORE INTO messages
-    (id, chat_jid, sender_jid, sender_name, from_me, timestamp, text, media_type, has_media, media_path, media_mime, status)
-  VALUES
-    (@id, @chat_jid, @sender_jid, @sender_name, @from_me, @timestamp, @text, @media_type, @has_media, @media_path, @media_mime, @status)
-`;
-
-function insertMessage(m) {
-  db.prepare(INSERT_MESSAGE).run({
-    id: m.id,
-    chat_jid: m.chatJid,
-    sender_jid: m.senderJid || '',
-    sender_name: m.senderName || '',
-    from_me: m.fromMe ? 1 : 0,
-    timestamp: m.timestamp,
-    text: m.text || '',
-    media_type: m.mediaType || null,
-    has_media: m.hasMedia ? 1 : 0,
-    media_path: m.mediaPath || null,
-    media_mime: m.mediaMime || null,
-    status: m.status || 'received',
-  });
+async function insertMessage(m) {
+  await pool.query(`
+    INSERT INTO messages
+      (id, chat_jid, sender_jid, sender_name, from_me, timestamp, text, media_type, has_media, media_path, media_mime, status)
+    VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12)
+    ON CONFLICT (chat_jid, id) DO NOTHING
+  `, [
+    m.id, m.chatJid, m.senderJid || '', m.senderName || '', Boolean(m.fromMe),
+    m.timestamp, m.text || '', m.mediaType || null, Boolean(m.hasMedia),
+    m.mediaPath || null, m.mediaMime || null, m.status || 'received',
+  ]);
 }
 
-function updateMessageMedia(chatJid, msgId, mediaPath, mediaMime) {
-  db.prepare('UPDATE messages SET media_path = ?, media_mime = ? WHERE chat_jid = ? AND id = ?')
-    .run(mediaPath, mediaMime, chatJid, msgId);
+async function updateMessageContent(chatJid, msgId, text, mediaType, hasMedia, mimetype) {
+  await pool.query(
+    'UPDATE messages SET text = $1, media_type = $2, has_media = $3, media_mime = $4 WHERE chat_jid = $5 AND id = $6',
+    [text, mediaType, Boolean(hasMedia), mimetype || null, chatJid, msgId]
+  );
 }
 
-function getMessage(chatJid, msgId) {
-  return db.prepare('SELECT * FROM messages WHERE chat_jid = ? AND id = ?').get(chatJid, msgId) || null;
+async function updateMessageMedia(chatJid, msgId, mediaPath, mediaMime) {
+  await pool.query(
+    'UPDATE messages SET media_path = $1, media_mime = $2 WHERE chat_jid = $3 AND id = $4',
+    [mediaPath, mediaMime, chatJid, msgId]
+  );
 }
 
-function getMessages(chatJid, { limit = 100, before = null } = {}) {
+async function getMessage(chatJid, msgId) {
+  const { rows } = await pool.query(
+    'SELECT * FROM messages WHERE chat_jid = $1 AND id = $2', [chatJid, msgId]
+  );
+  return rows[0] || null;
+}
+
+async function getMessages(chatJid, { limit = 100, before = null } = {}) {
   if (before) {
-    return db.prepare(
-      'SELECT * FROM messages WHERE chat_jid = ? AND timestamp < ? ORDER BY timestamp ASC LIMIT ?'
-    ).all(chatJid, before, limit);
+    const { rows } = await pool.query(
+      'SELECT * FROM messages WHERE chat_jid = $1 AND timestamp < $2 ORDER BY timestamp ASC LIMIT $3',
+      [chatJid, before, limit]
+    );
+    return rows;
   }
-  return db.prepare(
-    'SELECT * FROM messages WHERE chat_jid = ? ORDER BY timestamp ASC LIMIT ?'
-  ).all(chatJid, limit);
+  const { rows } = await pool.query(
+    'SELECT * FROM messages WHERE chat_jid = $1 ORDER BY timestamp ASC LIMIT $2',
+    [chatJid, limit]
+  );
+  return rows;
 }
 
-function getLatestMessages(chatJid, limit = 100) {
-  return db.prepare(
-    'SELECT * FROM messages WHERE chat_jid = ? ORDER BY timestamp DESC LIMIT ?'
-  ).all(chatJid, limit).reverse();
+async function getLatestMessages(chatJid, limit = 100) {
+  const { rows } = await pool.query(`
+    SELECT * FROM (
+      SELECT * FROM messages WHERE chat_jid = $1 ORDER BY timestamp DESC LIMIT $2
+    ) sub ORDER BY timestamp ASC
+  `, [chatJid, limit]);
+  return rows;
 }
 
-function getMessageCount(chatJid) {
-  const row = db.prepare('SELECT COUNT(*) AS cnt FROM messages WHERE chat_jid = ?').get(chatJid);
-  return row ? row.cnt : 0;
+async function getMessageCount(chatJid) {
+  const { rows } = await pool.query('SELECT COUNT(*)::int AS cnt FROM messages WHERE chat_jid = $1', [chatJid]);
+  return rows[0]?.cnt || 0;
 }
 
-function deleteMessage(chatJid, msgId) {
-  db.prepare('DELETE FROM messages WHERE chat_jid = ? AND id = ?').run(chatJid, msgId);
+async function deleteMessage(chatJid, msgId) {
+  await pool.query('DELETE FROM messages WHERE chat_jid = $1 AND id = $2', [chatJid, msgId]);
+  await recalculateLastMessage(chatJid);
+}
+
+async function pruneOldMessages(chatJid, maxMessages = 1000) {
+  const count = await getMessageCount(chatJid);
+  if (count <= maxMessages) return 0;
+
+  const toDelete = count - maxMessages;
+  await pool.query(`
+    DELETE FROM messages WHERE chat_jid = $1 AND id IN (
+      SELECT id FROM messages WHERE chat_jid = $1 ORDER BY timestamp ASC LIMIT $2
+    )
+  `, [chatJid, toDelete]);
+
+  await recalculateLastMessage(chatJid);
+  return toDelete;
+}
+
+// ─── Stats ───────────────────────────────────────────────────────────────────
+
+async function getStats() {
+  const [chats, contacts, messages] = await Promise.all([
+    pool.query('SELECT COUNT(*)::int AS c FROM chats'),
+    pool.query('SELECT COUNT(*)::int AS c FROM contacts'),
+    pool.query('SELECT COUNT(*)::int AS c FROM messages'),
+  ]);
+  return {
+    chats: chats.rows[0].c,
+    contacts: contacts.rows[0].c,
+    messages: messages.rows[0].c,
+  };
 }
 
 // ─── Helpers ─────────────────────────────────────────────────────────────────
@@ -277,8 +346,9 @@ function isGroup(jid) {
 }
 
 module.exports = {
-  init, getDb, close,
+  init, getPool, close,
   upsertContact, getContact, getAllContacts, resolveName, reResolveAllChatNames,
-  upsertChat, getChat, listChats, setUnreadCount, incrementUnread,
-  insertMessage, updateMessageMedia, getMessage, getMessages, getLatestMessages, getMessageCount, deleteMessage,
+  upsertChat, getChat, listChats, setUnreadCount, incrementUnread, recalculateLastMessage,
+  insertMessage, updateMessageContent, updateMessageMedia, getMessage, getMessages, getLatestMessages, getMessageCount, deleteMessage, pruneOldMessages,
+  getStats,
 };
