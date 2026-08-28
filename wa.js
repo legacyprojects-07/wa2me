@@ -24,7 +24,86 @@ let connectionStatus = 'starting';
 let historySyncComplete = false;
 let reconnectTimer = null;
 
-// Raw message cache for on-demand media downloads
+// ─── Presence Tracking ───────────────────────────────────────────────────────
+// In-memory store for online/typing status. Not persisted — ephemeral by nature.
+// Key: jid (individual) or jid:participant (group)
+// Value: { status, lastSeen, updatedAt }
+
+const presenceStore = new Map();
+const PRESENCE_TTL = 5 * 60 * 1000; // 5 minutes — after this, consider offline
+
+function updatePresence(jid, participant, status) {
+  const key = participant ? `${jid}:${participant}` : jid;
+  const now = Date.now();
+
+  const entry = presenceStore.get(key) || {};
+  presenceStore.set(key, {
+    status: status,
+    lastSeen: (status === 'unavailable' && entry.status !== 'unavailable') ? now : (entry.lastSeen || null),
+    updatedAt: now,
+  });
+}
+
+/**
+ * Get presence for a JID.
+ * For individual chats: pass just jid.
+ * For groups: pass group jid, returns Map of participant → presence.
+ */
+function getPresence(jid) {
+  if (isGroup(jid)) {
+    // Return all participants' presence for this group
+    const prefix = jid + ':';
+    const result = {};
+    for (const [key, val] of presenceStore) {
+      if (key.startsWith(prefix)) {
+        const participant = key.substring(prefix.length);
+        // Skip expired entries
+        if (Date.now() - val.updatedAt > PRESENCE_TTL) continue;
+        result[participant] = {
+          status: val.status,
+          lastSeen: val.lastSeen,
+          updatedAt: val.updatedAt,
+        };
+      }
+    }
+    return result;
+  }
+
+  const entry = presenceStore.get(jid);
+  if (!entry) return { status: 'unavailable', lastSeen: null, updatedAt: null };
+
+  // Expired → treat as offline
+  if (Date.now() - entry.updatedAt > PRESENCE_TTL) {
+    return { status: 'unavailable', lastSeen: entry.lastSeen, updatedAt: entry.updatedAt };
+  }
+
+  return {
+    status: entry.status,
+    lastSeen: entry.lastSeen,
+    updatedAt: entry.updatedAt,
+  };
+}
+
+/**
+ * Get all currently online/typing contacts.
+ */
+function getAllPresences() {
+  const result = {};
+  const now = Date.now();
+  for (const [key, val] of presenceStore) {
+    if (now - val.updatedAt > PRESENCE_TTL) continue;
+    if (val.status === 'unavailable') continue;
+    result[key] = {
+      status: val.status,
+      lastSeen: val.lastSeen,
+      updatedAt: val.updatedAt,
+    };
+  }
+  return result;
+}
+
+// ─── Raw Message Cache ───────────────────────────────────────────────────────
+
 const rawMsgCache = new Map();
 const RAW_CACHE_TTL = 24 * 60 * 60 * 1000;
 const RAW_CACHE_MAX = 5000;
@@ -53,7 +132,7 @@ function getRawMsg(chatJid, msgId) {
 
 // ─── Record Logic ────────────────────────────────────────────────────────────
 
-function recordMessage(msg, { isHistorySync = false } = {}) {
+async function recordMessage(msg, { isHistorySync = false } = {}) {
   if (!msg || !msg.key) return;
   const chatJid = msg.key.remoteJid;
   if (!chatJid || chatJid === 'status@broadcast' || chatJid.endsWith('@newsletter')) return;
@@ -72,35 +151,34 @@ function recordMessage(msg, { isHistorySync = false } = {}) {
     senderName = 'You';
   } else if (isGroup(chatJid)) {
     senderJid = msg.key.participant || msg.participant || '';
-    senderName = msg.pushName || db.resolveName(senderJid, senderJid.replace(/@.*/, ''));
+    senderName = msg.pushName || await db.resolveName(senderJid, senderJid.replace(/@.*/, ''));
   } else {
     senderJid = chatJid;
-    senderName = msg.pushName || db.resolveName(chatJid, '');
+    senderName = msg.pushName || await db.resolveName(chatJid, '');
   }
 
-  // Record contact from pushName
   if (msg.pushName && !fromMe) {
     const contactJid = isGroup(chatJid) ? (msg.key.participant || '') : chatJid;
-    if (contactJid) db.upsertContact({ id: contactJid, notify: msg.pushName, isSaved: false });
+    if (contactJid) await db.upsertContact({ id: contactJid, notify: msg.pushName, isSaved: false });
   }
 
-  db.insertMessage({
+  await db.insertMessage({
     id: msg.key.id, chatJid, senderJid, senderName, fromMe, timestamp,
     text: parsed.text, mediaType: parsed.mediaType, hasMedia: parsed.hasMedia,
     mediaPath: null, mediaMime: parsed.mimetype, status: fromMe ? 'sent' : 'received',
   });
 
-  const existingChat = db.getChat(chatJid);
-  const chatName = existingChat?.name || db.resolveName(chatJid, '');
+  const existingChat = await db.getChat(chatJid);
+  const chatName = existingChat?.name || await db.resolveName(chatJid, '');
 
-  db.upsertChat({
+  await db.upsertChat({
     id: chatJid, name: chatName,
     conversationTimestamp: timestamp,
     lastMessage: parsed.text || (parsed.mediaType ? `[${parsed.mediaType}]` : ''),
     unreadCount: 0,
   }, { isInitialSync: isHistorySync });
 
-  if (!fromMe && !isHistorySync) db.incrementUnread(chatJid);
+  if (!fromMe && !isHistorySync) await db.incrementUnread(chatJid);
   if (parsed.hasMedia) cacheRawMsg(msg);
 }
 
@@ -108,12 +186,12 @@ async function downloadMediaBackground(msg) {
   if (!msg || !msg.key || !sock) return;
   const chatJid = msg.key.remoteJid;
   const msgId = msg.key.id;
-  const existing = db.getMessage(chatJid, msgId);
+  const existing = await db.getMessage(chatJid, msgId);
   if (existing && existing.media_path) return;
 
   try {
     const result = await media.downloadAndSave(msg, sock);
-    if (result) db.updateMessageMedia(chatJid, msgId, result.filePath, result.mimetype);
+    if (result) await db.updateMessageMedia(chatJid, msgId, result.filePath, result.mimetype);
   } catch (err) {
     logger.warn(`[Media BG] Failed ${chatJid}/${msgId}: ${err.message}`);
   }
@@ -163,71 +241,134 @@ async function start(authDir) {
 
   // ── History Sync ─────────────────────────────────────────────────────────
 
-  sock.ev.on('messaging-history.set', ({ chats: sc, contacts: sco, messages: sm, isLatest }) => {
+  sock.ev.on('messaging-history.set', async ({ chats: sc, contacts: sco, messages: sm, isLatest }) => {
     console.log(`[WA] History: ${sc?.length || 0} chats, ${sco?.length || 0} contacts, ${sm?.length || 0} msgs`);
 
-    if (sco) for (const c of sco) db.upsertContact({ id: c.id, name: c.name || '', notify: c.notify || '', phoneNumber: c.phoneNumber || '', isSaved: Boolean(c.name?.trim()) });
-    if (sc) for (const c of sc) db.upsertChat(c, { isInitialSync: true });
+    if (sco) for (const c of sco) await db.upsertContact({ id: c.id, name: c.name || '', notify: c.notify || '', phoneNumber: c.phoneNumber || '', isSaved: Boolean(c.name?.trim()) });
+    if (sc) for (const c of sc) await db.upsertChat(c, { isInitialSync: true });
     if (sm && sm.length > 0) {
       const sorted = [...sm].sort((a, b) => parseTimestamp(a.messageTimestamp) - parseTimestamp(b.messageTimestamp));
-      for (const msg of sorted) recordMessage(msg, { isHistorySync: true });
+      for (const msg of sorted) await recordMessage(msg, { isHistorySync: true });
     }
 
-    db.reResolveAllChatNames();
+    await db.reResolveAllChatNames();
     if (isLatest) { historySyncComplete = true; console.log('[WA] History sync complete'); }
   });
 
   // ── Contact Events ───────────────────────────────────────────────────────
 
-  sock.ev.on('contacts.upsert', (newContacts) => {
-    for (const c of (newContacts || [])) db.upsertContact({ id: c.id, name: c.name || '', notify: c.notify || '', phoneNumber: c.phoneNumber || '', isSaved: Boolean(c.name?.trim()) });
-    db.reResolveAllChatNames();
+  sock.ev.on('contacts.upsert', async (newContacts) => {
+    for (const c of (newContacts || [])) await db.upsertContact({ id: c.id, name: c.name || '', notify: c.notify || '', phoneNumber: c.phoneNumber || '', isSaved: Boolean(c.name?.trim()) });
+    await db.reResolveAllChatNames();
   });
 
-  sock.ev.on('contacts.update', (updates) => {
-    for (const u of (updates || [])) { if (!u.id) continue; db.upsertContact({ id: u.id, name: u.name || '', notify: u.notify || '', phoneNumber: u.phoneNumber || '', isSaved: Boolean(u.name?.trim()) }); }
-    db.reResolveAllChatNames();
+  sock.ev.on('contacts.update', async (updates) => {
+    for (const u of (updates || [])) { if (!u.id) continue; await db.upsertContact({ id: u.id, name: u.name || '', notify: u.notify || '', phoneNumber: u.phoneNumber || '', isSaved: Boolean(u.name?.trim()) }); }
+    await db.reResolveAllChatNames();
   });
 
   // ── Chat Events ──────────────────────────────────────────────────────────
 
-  sock.ev.on('chats.upsert', (newChats) => { for (const c of (newChats || [])) db.upsertChat(c); });
-  sock.ev.on('chats.update', (updates) => { for (const u of (updates || [])) { if (u.id) db.upsertChat({ id: u.id, ...u }); } });
-  sock.ev.on('chats.delete', (deleted) => {
-    const d = db.getDb();
-    for (const jid of (deleted || [])) { d.prepare('DELETE FROM chats WHERE jid = ?').run(jid); d.prepare('DELETE FROM messages WHERE chat_jid = ?').run(jid); }
+  sock.ev.on('chats.upsert', async (newChats) => {
+    for (const c of (newChats || [])) await db.upsertChat(c, { fromEvent: true });
+  });
+  sock.ev.on('chats.update', async (updates) => {
+    for (const u of (updates || [])) {
+      if (u.id) await db.upsertChat({ id: u.id, ...u }, { fromEvent: true });
+    }
+  });
+  sock.ev.on('chats.delete', async (deleted) => {
+    for (const jid of (deleted || [])) {
+      await db.getPool().query('DELETE FROM chats WHERE jid = $1', [jid]);
+      await db.getPool().query('DELETE FROM messages WHERE chat_jid = $1', [jid]);
+    }
   });
 
   // ── Message Events ───────────────────────────────────────────────────────
 
-  sock.ev.on('messages.upsert', ({ messages: msgs }) => {
+  sock.ev.on('messages.upsert', async ({ messages: msgs }) => {
     for (const m of (msgs || [])) {
-      recordMessage(m);
+      await recordMessage(m);
       const parsed = parseMessageContent(m);
       if (parsed && parsed.hasMedia && !m.key.fromMe) downloadMediaBackground(m);
     }
   });
 
-  sock.ev.on('messages.update', (updates) => {
+  sock.ev.on('messages.update', async (updates) => {
     for (const item of (updates || [])) {
       if (!item.key) continue;
       const { remoteJid, id } = item.key;
       const upd = item.update || {};
+
       if (upd.status !== undefined) {
         const statusMap = { 0: 'error', 1: 'pending', 2: 'sent', 3: 'delivered', 4: 'read' };
-        db.getDb().prepare('UPDATE messages SET status = ? WHERE chat_jid = ? AND id = ?').run(statusMap[upd.status] || 'received', remoteJid, id);
+        await db.getPool().query(
+          'UPDATE messages SET status = $1 WHERE chat_jid = $2 AND id = $3',
+          [statusMap[upd.status] || 'received', remoteJid, id]
+        );
       }
-      if (upd.message === null) db.deleteMessage(remoteJid, id);
+
+      if (upd.message !== undefined && upd.message !== null) {
+        const parsed = parseMessageContent({ message: upd.message });
+        if (parsed) {
+          await db.updateMessageContent(remoteJid, id, parsed.text, parsed.mediaType, parsed.hasMedia, parsed.mimetype);
+          await db.recalculateLastMessage(remoteJid);
+        }
+      }
+
+      if (upd.message === null && upd.status === undefined) {
+        await db.deleteMessage(remoteJid, id);
+      }
     }
   });
 
-  // ── Cache Cleanup ────────────────────────────────────────────────────────
+  // ── Presence Events (online / typing / recording) ────────────────────────
 
-  setInterval(() => {
+  sock.ev.on('presence.update', ({ id: chatJid, presences }) => {
+    if (!presences) return;
+
+    for (const [participantJid, presence] of Object.entries(presences)) {
+      const status = presence.lastKnownPresence || 'unavailable';
+
+      if (isGroup(chatJid)) {
+        // Group: track per-participant presence
+        updatePresence(chatJid, participantJid, status);
+        logger.info(`[Presence] ${participantJid} in ${chatJid}: ${status}`);
+      } else {
+        // Individual chat
+        updatePresence(chatJid, null, status);
+        logger.info(`[Presence] ${chatJid}: ${status}`);
+      }
+    }
+  });
+
+  // ── Periodic Cleanup ─────────────────────────────────────────────────────
+
+  setInterval(async () => {
+    // Evict expired raw message cache entries
     const cutoff = Date.now() - RAW_CACHE_TTL;
     let n = 0;
     for (const [k, v] of rawMsgCache) { if (v.ts < cutoff) { rawMsgCache.delete(k); n++; } }
-    if (n) logger.info(`[Cache] Evicted ${n} entries`);
+    if (n) logger.info(`[Cache] Evicted ${n} raw msg entries`);
+
+    // Evict expired presence entries
+    const presenceCutoff = Date.now() - PRESENCE_TTL;
+    let pn = 0;
+    for (const [k, v] of presenceStore) { if (v.updatedAt < presenceCutoff) { presenceStore.delete(k); pn++; } }
+    if (pn) logger.info(`[Presence] Evicted ${pn} expired entries`);
+
+    // Prune old messages per chat
+    try {
+      const { rows } = await db.getPool().query('SELECT jid FROM chats');
+      let totalPruned = 0;
+      for (const { jid } of rows) {
+        const pruned = await db.pruneOldMessages(jid, 1000);
+        totalPruned += pruned;
+      }
+      if (totalPruned > 0) logger.info(`[Prune] Removed ${totalPruned} old messages`);
+    } catch (err) {
+      logger.warn(`[Prune] Error: ${err.message}`);
+    }
   }, 3600000);
 }
 
@@ -239,7 +380,7 @@ async function sendText(jid, text) {
   await sock.presenceUpdate('composing', jid);
   const result = await sock.sendMessage(jid, { text });
   await sock.presenceUpdate('paused', jid);
-  if (result?.key) recordMessage(result);
+  if (result?.key) await recordMessage(result);
   return result;
 }
 
@@ -257,16 +398,16 @@ async function sendMedia(jid, { buffer, mediaType, caption, mimetype, fileName }
   }
 
   const result = await sock.sendMessage(jid, payload);
-  if (result?.key) recordMessage(result);
+  if (result?.key) await recordMessage(result);
   return result;
 }
 
 async function markChatRead(jid) {
   jid = normalizeJid(jid);
-  db.setUnreadCount(jid, 0);
+  await db.setUnreadCount(jid, 0);
   if (sock && connectionStatus === 'connected') {
     try {
-      const msgs = db.getLatestMessages(jid, 5).filter(m => !m.from_me).map(m => ({ key: { remoteJid: jid, id: m.id, fromMe: false }, messageTimestamp: m.timestamp }));
+      const msgs = (await db.getLatestMessages(jid, 5)).filter(m => !m.from_me).map(m => ({ key: { remoteJid: jid, id: m.id, fromMe: false }, messageTimestamp: m.timestamp }));
       if (msgs.length > 0) await sock.readMessages(msgs);
     } catch (err) { logger.warn(`[WA] Read receipt failed for ${jid}: ${err.message}`); }
   }
@@ -281,7 +422,7 @@ async function downloadMediaOnDemand(chatJid, msgId) {
   const rawMsg = getRawMsg(chatJid, msgId);
   if (!rawMsg) return null;
   const result = await media.downloadAndSave(rawMsg, sock);
-  if (result) { db.updateMessageMedia(chatJid, msgId, result.filePath, result.mimetype); return { filePath: result.filePath, mimetype: result.mimetype }; }
+  if (result) { await db.updateMessageMedia(chatJid, msgId, result.filePath, result.mimetype); return { filePath: result.filePath, mimetype: result.mimetype }; }
   return null;
 }
 
@@ -295,4 +436,6 @@ async function stop() { if (reconnectTimer) clearTimeout(reconnectTimer); if (so
 module.exports = {
   start, stop, sendText, sendMedia, markChatRead,
   getStatus, getQR, downloadMediaOnDemand, getProfilePicUrl,
+  // Presence
+  getPresence, getAllPresences,
 };
