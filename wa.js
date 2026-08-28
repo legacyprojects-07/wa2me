@@ -203,11 +203,17 @@ async function start(authDir) {
   const { state, saveCreds } = await useMultiFileAuthState(authDir);
   const { version } = await fetchLatestBaileysVersion();
 
-  const authStore = makeCacheableSignalKeyStore
-    ? makeCacheableSignalKeyStore(state, logger) : state;
+  // makeCacheableSignalKeyStore wraps state.keys, NOT the entire state object.
+  // Passing the whole state causes "Cannot read properties of undefined (reading 'me')".
+  const auth = {
+    creds: state.creds,
+    keys: makeCacheableSignalKeyStore
+      ? makeCacheableSignalKeyStore(state.keys, logger)
+      : state.keys,
+  };
 
   sock = makeWASocket({
-    auth: authStore, version, logger,
+    auth, version, logger,
     printQRInTerminal: false,
     syncFullHistory: true,
     generateHighQualityLinkPreview: false,
