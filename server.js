@@ -17,15 +17,9 @@ const { safeJSON, normalizeJid } = require('./helpers');
 
 const PORT = parseInt(process.env.PORT, 10) || 3000;
 const AUTH_DIR = path.resolve(process.env.AUTH_DIR || './auth_state');
-const DB_PATH = path.resolve(process.env.DB_PATH || './data/whatsapp.db');
 const MEDIA_DIR = path.resolve(process.env.MEDIA_DIR || './data/media');
 const API_KEY = process.env.API_KEY || '';
-const RENDER_URL = process.env.RENDER_EXTERNAL_URL || ''; // Auto-set by Render
-
-// ─── Init ────────────────────────────────────────────────────────────────────
-
-db.init(DB_PATH);
-media.init(MEDIA_DIR);
+const RENDER_URL = process.env.RENDER_EXTERNAL_URL || '';
 
 // ─── Express ─────────────────────────────────────────────────────────────────
 
@@ -43,7 +37,7 @@ app.use((req, res, next) => {
 
 if (API_KEY) {
   app.use((req, res, next) => {
-    if (req.path === '/health' || req.path === '/qr-image') return next(); // Allow health checks
+    if (req.path === '/health' || req.path === '/qr-image') return next();
     const key = req.headers['x-api-key'] || req.query.api_key;
     if (key !== API_KEY) return res.status(401).json({ error: 'Unauthorized' });
     next();
@@ -58,17 +52,11 @@ const upload = multer({ limits: { fileSize: 16 * 1024 * 1024 }, storage: multer.
 
 // ─── Health & QR ─────────────────────────────────────────────────────────────
 
-app.get('/health', (req, res) => {
+app.get('/health', async (req, res) => {
   const s = wa.getStatus();
-  const d = db.getDb();
-  sendJSON(res, {
-    ...s,
-    stats: {
-      chats: d.prepare('SELECT COUNT(*) AS c FROM chats').get().c,
-      contacts: d.prepare('SELECT COUNT(*) AS c FROM contacts').get().c,
-      messages: d.prepare('SELECT COUNT(*) AS c FROM messages').get().c,
-    },
-  });
+  let stats = { chats: 0, contacts: 0, messages: 0 };
+  try { stats = await db.getStats(); } catch {}
+  sendJSON(res, { ...s, stats });
 });
 
 app.get('/qr', async (req, res) => {
@@ -92,7 +80,7 @@ app.get('/qr-image', async (req, res) => {
 
 // ─── Chats ───────────────────────────────────────────────────────────────────
 
-app.get('/chats', (req, res) => {
+app.get('/chats', async (req, res) => {
   const s = wa.getStatus();
   if (s.status !== 'connected') return sendJSON(res, { error: `Not connected (${s.status})` }, 503);
 
@@ -100,7 +88,7 @@ app.get('/chats', (req, res) => {
   const limit = Math.min(parseInt(req.query.limit, 10) || 200, 500);
   const offset = parseInt(req.query.offset, 10) || 0;
 
-  const chats = db.listChats({ savedOnly, limit, offset });
+  const chats = await db.listChats({ savedOnly, limit, offset });
   sendJSON(res, chats.map(c => ({
     jid: c.jid,
     name: c.name || c.contact_name || c.contact_notify || c.jid.replace(/@.*/, ''),
@@ -111,12 +99,14 @@ app.get('/chats', (req, res) => {
   })));
 });
 
-app.get('/chats/:jid', (req, res) => {
+app.get('/chats/:jid', async (req, res) => {
   const jid = normalizeJid(decodeURIComponent(req.params.jid));
-  const chat = db.getChat(jid);
+  const chat = await db.getChat(jid);
   if (!chat) return sendJSON(res, { error: 'Chat not found' }, 404);
 
-  const contact = db.getContact(jid);
+  const contact = await db.getContact(jid);
+  const presence = wa.getPresence(jid);
+
   sendJSON(res, {
     jid: chat.jid,
     name: chat.name || contact?.name || contact?.notify || jid.replace(/@.*/, ''),
@@ -124,21 +114,24 @@ app.get('/chats/:jid', (req, res) => {
     unreadCount: chat.unread_count,
     lastMessageTs: chat.last_message_ts,
     lastMessage: chat.last_message,
-    messageCount: db.getMessageCount(jid),
+    messageCount: await db.getMessageCount(jid),
     contact: contact ? { name: contact.name, notify: contact.notify, phoneNumber: contact.phone_number, isSaved: Boolean(contact.is_saved) } : null,
+    presence: presence,
   });
 });
 
 // ─── Messages ────────────────────────────────────────────────────────────────
 
-app.get('/messages/:jid', (req, res) => {
+app.get('/messages/:jid', async (req, res) => {
   const jid = normalizeJid(decodeURIComponent(req.params.jid));
   const limit = Math.min(parseInt(req.query.limit, 10) || 100, 500);
   const before = req.query.before ? parseInt(req.query.before, 10) : null;
 
-  wa.markChatRead(jid);
+  await wa.markChatRead(jid);
 
-  const messages = before ? db.getMessages(jid, { limit, before }) : db.getLatestMessages(jid, limit);
+  const messages = before
+    ? await db.getMessages(jid, { limit, before })
+    : await db.getLatestMessages(jid, limit);
 
   sendJSON(res, messages.map(m => ({
     id: m.id,
@@ -198,6 +191,19 @@ app.get('/profile-pic/:jid', async (req, res) => {
   } catch { sendJSON(res, { error: 'Profile picture unavailable' }, 404); }
 });
 
+// ─── Presence (online / typing / recording) ──────────────────────────────────
+
+app.get('/presence/:jid', (req, res) => {
+  const jid = normalizeJid(decodeURIComponent(req.params.jid));
+  const presence = wa.getPresence(jid);
+  sendJSON(res, presence);
+});
+
+app.get('/presence', (req, res) => {
+  const all = wa.getAllPresences();
+  sendJSON(res, all);
+});
+
 // ─── Send ────────────────────────────────────────────────────────────────────
 
 app.post('/send', async (req, res) => {
@@ -245,25 +251,23 @@ app.post('/chats/:jid/read', async (req, res) => {
 
 // ─── Contacts ────────────────────────────────────────────────────────────────
 
-app.get('/contacts', (req, res) => {
-  sendJSON(res, db.getAllContacts().map(c => ({
+app.get('/contacts', async (req, res) => {
+  const contacts = await db.getAllContacts();
+  sendJSON(res, contacts.map(c => ({
     jid: c.jid, name: c.name || c.notify || c.phone_number || c.jid.replace(/@.*/, ''),
     notify: c.notify, phoneNumber: c.phone_number, isSaved: Boolean(c.is_saved),
   })));
 });
 
-// ─── Keep-Alive (prevent Render free tier spin-down) ─────────────────────────
+// ─── Keep-Alive ──────────────────────────────────────────────────────────────
 
 function startKeepAlive() {
   if (!RENDER_URL) return;
   const url = RENDER_URL + '/health';
-  console.log(`[KeepAlive] Pinging ${url} every 10 minutes to prevent spin-down`);
+  console.log(`[KeepAlive] Pinging ${url} every 10 minutes`);
   setInterval(async () => {
-    try {
-      const res = await fetch(url);
-      if (res.ok) logger.info('[KeepAlive] Ping OK');
-    } catch {}
-  }, 10 * 60 * 1000); // Every 10 minutes
+    try { await fetch(url); } catch {}
+  }, 10 * 60 * 1000);
 }
 
 // ─── Error Handler ───────────────────────────────────────────────────────────
@@ -276,11 +280,15 @@ app.use((err, req, res, next) => {
 // ─── Boot ────────────────────────────────────────────────────────────────────
 
 async function boot() {
-  console.log(`[Boot] WhatsApp Baileys Server v2`);
-  console.log(`[Boot] DB: ${DB_PATH}`);
-  console.log(`[Boot] Media: ${MEDIA_DIR}`);
+  console.log(`[Boot] WhatsApp Baileys Server v4 (Render PostgreSQL + Presence)`);
   console.log(`[Boot] Auth: ${AUTH_DIR}`);
+  console.log(`[Boot] Media: ${MEDIA_DIR}`);
   if (RENDER_URL) console.log(`[Boot] Render URL: ${RENDER_URL}`);
+
+  await db.init();
+  console.log('[Boot] Database connected');
+
+  media.init(MEDIA_DIR);
 
   await wa.start(AUTH_DIR);
 
@@ -290,7 +298,7 @@ async function boot() {
   });
 }
 
-process.on('SIGTERM', async () => { console.log('[Shutdown] SIGTERM'); await wa.stop(); db.close(); process.exit(0); });
-process.on('SIGINT', async () => { console.log('[Shutdown] SIGINT'); await wa.stop(); db.close(); process.exit(0); });
+process.on('SIGTERM', async () => { console.log('[Shutdown] SIGTERM'); await wa.stop(); await db.close(); process.exit(0); });
+process.on('SIGINT', async () => { console.log('[Shutdown] SIGINT'); await wa.stop(); await db.close(); process.exit(0); });
 
 boot().catch(err => { console.error('[Boot Error]', err); process.exit(1); });
