@@ -16,7 +16,6 @@ const { safeJSON, normalizeJid } = require('./helpers');
 // ─── Config ──────────────────────────────────────────────────────────────────
 
 const PORT = parseInt(process.env.PORT, 10) || 3000;
-const AUTH_DIR = path.resolve(process.env.AUTH_DIR || './auth_state');
 const MEDIA_DIR = path.resolve(process.env.MEDIA_DIR || './data/media');
 const API_KEY = process.env.API_KEY || '';
 const RENDER_URL = process.env.RENDER_EXTERNAL_URL || '';
@@ -280,8 +279,7 @@ app.use((err, req, res, next) => {
 // ─── Boot ────────────────────────────────────────────────────────────────────
 
 async function boot() {
-  console.log(`[Boot] WhatsApp Baileys Server v4 (Render PostgreSQL + Presence)`);
-  console.log(`[Boot] Auth: ${AUTH_DIR}`);
+  console.log(`[Boot] WhatsApp Baileys Server v5 (PostgreSQL Auth + Presence)`);
   console.log(`[Boot] Media: ${MEDIA_DIR}`);
   if (RENDER_URL) console.log(`[Boot] Render URL: ${RENDER_URL}`);
 
@@ -290,7 +288,7 @@ async function boot() {
 
   media.init(MEDIA_DIR);
 
-  await wa.start(AUTH_DIR);
+  await wa.start();
 
   app.listen(PORT, '0.0.0.0', () => {
     console.log(`[Boot] Listening on port ${PORT}`);
