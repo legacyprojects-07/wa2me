@@ -1,6 +1,7 @@
 'use strict';
 
 const pino = require('pino');
+const path = require('path');
 const {
   default: makeWASocket,
   DisconnectReason,
@@ -9,7 +10,7 @@ const {
 const { parseTimestamp, parseMessageContent, isGroup, normalizeJid } = require('./helpers');
 const db = require('./db');
 const media = require('./media');
-const { usePostgresAuthState } = require('./auth');
+const { useHybridAuthState } = require('./auth');
 
 let delay;
 try { ({ delay } = require('@whiskeysockets/baileys')); } catch {}
@@ -199,22 +200,19 @@ async function downloadMediaBackground(msg) {
 // ─── WhatsApp Connection ─────────────────────────────────────────────────────
 
 async function start() {
-  // Load auth state from PostgreSQL (survives redeploys)
-  const { state, saveCreds } = await usePostgresAuthState(db.getPool());
+  const authDir = path.resolve(process.env.AUTH_DIR || './auth_state');
+
+  // Hybrid auth: filesystem (fast) + PostgreSQL (survives redeploys)
+  const { state, saveCreds } = await useHybridAuthState(authDir, db.getPool());
   const { version } = await fetchLatestBaileysVersion();
 
-  // Wrap keys with cache for performance (creds stay as-is)
-  const auth = {
-    creds: state.creds,
-    keys: state.keys,
-  };
-
   sock = makeWASocket({
-    auth, version, logger,
+    auth: { creds: state.creds, keys: state.keys },
+    version, logger,
     printQRInTerminal: false,
     syncFullHistory: true,
     generateHighQualityLinkPreview: false,
-    markOnlineOnConnect: false,
+    markOnlineOnConnect: true,  // Show as online to other contacts
   });
 
   sock.ev.on('creds.update', saveCreds);
