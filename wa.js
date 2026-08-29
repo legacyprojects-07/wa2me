@@ -414,6 +414,19 @@ async function markChatRead(jid) {
   }
 }
 
+/**
+ * Send a typing/paused/recording presence update to WhatsApp.
+ * The recipient sees "typing..." or "recording..." in their chat.
+ *
+ * @param {string} jid - Chat JID
+ * @param {string} status - 'composing' | 'paused' | 'recording'
+ */
+async function sendPresenceUpdate(jid, status) {
+  if (!sock || connectionStatus !== 'connected') throw new Error(`Not connected (${connectionStatus})`);
+  jid = normalizeJid(jid);
+  await sock.presenceUpdate(status, jid);
+}
+
 function getStatus() { return { status: connectionStatus, user: sock?.user ? { id: sock.user.id, name: sock.user.name || '' } : null, historySyncComplete }; }
 function getQR() { return latestQR; }
 
@@ -435,7 +448,7 @@ async function getProfilePicUrl(jid) {
 async function stop() { if (reconnectTimer) clearTimeout(reconnectTimer); if (sock) { sock.end(); sock = null; } }
 
 module.exports = {
-  start, stop, sendText, sendMedia, markChatRead,
+  start, stop, sendText, sendMedia, markChatRead, sendPresenceUpdate,
   getStatus, getQR, downloadMediaOnDemand, getProfilePicUrl,
   // Presence
   getPresence, getAllPresences,
