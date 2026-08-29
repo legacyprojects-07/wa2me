@@ -16,6 +16,7 @@ const { safeJSON, normalizeJid } = require('./helpers');
 // ─── Config ──────────────────────────────────────────────────────────────────
 
 const PORT = parseInt(process.env.PORT, 10) || 3000;
+const AUTH_DIR = path.resolve(process.env.AUTH_DIR || './auth_state');
 const MEDIA_DIR = path.resolve(process.env.MEDIA_DIR || './data/media');
 const API_KEY = process.env.API_KEY || '';
 const RENDER_URL = process.env.RENDER_EXTERNAL_URL || '';
@@ -248,6 +249,19 @@ app.post('/chats/:jid/read', async (req, res) => {
   catch (err) { sendJSON(res, { error: err.message }, 500); }
 });
 
+// ─── Typing Indicator ────────────────────────────────────────────────────────
+
+app.post('/chats/:jid/typing', async (req, res) => {
+  const { status } = req.body || {};
+  const jid = normalizeJid(decodeURIComponent(req.params.jid));
+  const validStatuses = ['composing', 'paused', 'recording'];
+  const presenceStatus = validStatuses.includes(status) ? status : 'composing';
+  try {
+    await wa.sendPresenceUpdate(jid, presenceStatus);
+    sendJSON(res, { ok: true, status: presenceStatus });
+  } catch (err) { sendJSON(res, { error: err.message }, 500); }
+});
+
 // ─── Contacts ────────────────────────────────────────────────────────────────
 
 app.get('/contacts', async (req, res) => {
@@ -279,7 +293,8 @@ app.use((err, req, res, next) => {
 // ─── Boot ────────────────────────────────────────────────────────────────────
 
 async function boot() {
-  console.log(`[Boot] WhatsApp Baileys Server v5 (PostgreSQL Auth + Presence)`);
+  console.log(`[Boot] OpenKnot Server v5 (Hybrid Auth + Presence)`);
+  console.log(`[Boot] Auth: ${AUTH_DIR}`);
   console.log(`[Boot] Media: ${MEDIA_DIR}`);
   if (RENDER_URL) console.log(`[Boot] Render URL: ${RENDER_URL}`);
 
