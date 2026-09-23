@@ -291,6 +291,17 @@ app.post('/chats/:jid/read', async (req, res) => {
   catch (err) { sendJSON(res, { error: err.message }, 500); }
 });
 
+// Fix unread counts — resets all to 0 (run once after deploying the unread fix)
+app.all('/fix-unread', async (req, res) => {
+  try {
+    await db.getPool().query('UPDATE chats SET unread_count = 0');
+    const { rows } = await db.getPool().query('SELECT COUNT(*)::int AS c FROM chats');
+    sendJSON(res, { ok: true, message: `Reset unread count to 0 for ${rows[0].c} chats` });
+  } catch (err) {
+    sendJSON(res, { error: err.message }, 500);
+  }
+});
+
 // ─── Typing Indicator ────────────────────────────────────────────────────────
 
 app.post('/chats/:jid/typing', async (req, res) => {
