@@ -176,7 +176,7 @@ async function recordMessage(msg, { isHistorySync = false } = {}) {
     conversationTimestamp: timestamp,
     lastMessage: parsed.text || (parsed.mediaType ? `[${parsed.mediaType}]` : ''),
     unreadCount: 0,
-  }, { isInitialSync: isHistorySync });
+  }, { isInitialSync: isHistorySync, preserveUnread: isHistorySync });
 
   if (!fromMe && !isHistorySync) await db.incrementUnread(chatJid);
   if (parsed.hasMedia) cacheRawMsg(msg);
