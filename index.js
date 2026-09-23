@@ -59,6 +59,26 @@ app.get('/health', async (req, res) => {
   sendJSON(res, { ...s, stats });
 });
 
+// Reset auth — clears credentials from PostgreSQL and filesystem, forces fresh QR scan
+app.post('/reset', async (req, res) => {
+  try {
+    const { clearAuth } = require('./auth');
+    await clearAuth(db.getPool());
+    // Clear filesystem auth too
+    const authDir = require('path').resolve(process.env.AUTH_DIR || './auth_state');
+    if (require('fs').existsSync(authDir)) {
+      require('fs').rmSync(authDir, { recursive: true, force: true });
+    }
+    // Stop current connection
+    await wa.stop();
+    // Restart
+    setTimeout(() => wa.start(), 2000);
+    sendJSON(res, { ok: true, message: 'Auth cleared. Scan QR at /qr-image in a few seconds.' });
+  } catch (err) {
+    sendJSON(res, { error: err.message }, 500);
+  }
+});
+
 app.get('/qr', async (req, res) => {
   const s = wa.getStatus();
   if (s.status === 'connected') return sendJSON(res, { status: 'connected', qr: null });
