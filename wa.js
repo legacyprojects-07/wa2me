@@ -378,9 +378,9 @@ async function start() {
 async function sendText(jid, text) {
   if (!sock || connectionStatus !== 'connected') throw new Error(`Not connected (${connectionStatus})`);
   jid = normalizeJid(jid);
-  await sock.presenceUpdate('composing', jid);
+  try { await sock.sendPresenceUpdate('composing', jid); } catch {}
   const result = await sock.sendMessage(jid, { text });
-  await sock.presenceUpdate('paused', jid);
+  try { await sock.sendPresenceUpdate('paused', jid); } catch {}
   if (result?.key) await recordMessage(result);
   return result;
 }
@@ -424,7 +424,7 @@ async function markChatRead(jid) {
 async function sendPresenceUpdate(jid, status) {
   if (!sock || connectionStatus !== 'connected') throw new Error(`Not connected (${connectionStatus})`);
   jid = normalizeJid(jid);
-  await sock.presenceUpdate(status, jid);
+  await sock.sendPresenceUpdate(status, jid);
 }
 
 function getStatus() { return { status: connectionStatus, user: sock?.user ? { id: sock.user.id, name: sock.user.name || '' } : null, historySyncComplete }; }
