@@ -142,14 +142,19 @@ async function reResolveAllChatNames() {
 
 // ─── Chats ───────────────────────────────────────────────────────────────────
 
-async function upsertChat(chat, { isInitialSync = false, fromEvent = false, forceName = false } = {}) {
+async function upsertChat(chat, { isInitialSync = false, fromEvent = false, forceName = false, preserveUnread = false } = {}) {
   if (!chat || !chat.id) return;
 
   const existing = await getChat(chat.id);
   const name = await resolveName(chat.id, chat.name || chat.subject || (existing && existing.name) || '');
 
   let unreadCount;
-  if (isInitialSync || fromEvent) {
+  if (preserveUnread) {
+    // Don't touch unread count — used during history sync message recording
+    // The count was already set correctly by the chat sync step
+    unreadCount = existing ? existing.unread_count : 0;
+  } else if (isInitialSync || fromEvent) {
+    // Trust WhatsApp's unread count
     if (chat.unreadCount !== undefined && chat.unreadCount !== null) {
       unreadCount = chat.unreadCount;
     } else if (chat.unread_count !== undefined) {
@@ -158,6 +163,7 @@ async function upsertChat(chat, { isInitialSync = false, fromEvent = false, forc
       unreadCount = existing ? existing.unread_count : 0;
     }
   } else {
+    // New message — preserve existing count, incrementUnread handles +1
     unreadCount = existing ? existing.unread_count : 0;
   }
 
