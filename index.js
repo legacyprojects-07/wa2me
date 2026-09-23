@@ -60,21 +60,43 @@ app.get('/health', async (req, res) => {
 });
 
 // Reset auth — clears credentials from PostgreSQL and filesystem, forces fresh QR scan
-app.post('/reset', async (req, res) => {
+// Works with both GET (browser) and POST
+app.all('/reset', async (req, res) => {
   try {
+    console.log('[Reset] Clearing all auth data...');
+
+    // 1. Stop WhatsApp connection first
+    await wa.stop();
+    console.log('[Reset] WhatsApp connection stopped');
+
+    // 2. Clear auth from PostgreSQL
     const { clearAuth } = require('./auth');
     await clearAuth(db.getPool());
-    // Clear filesystem auth too
+    console.log('[Reset] PostgreSQL auth cleared');
+
+    // 3. Clear filesystem auth
     const authDir = require('path').resolve(process.env.AUTH_DIR || './auth_state');
     if (require('fs').existsSync(authDir)) {
       require('fs').rmSync(authDir, { recursive: true, force: true });
+      console.log('[Reset] Filesystem auth cleared');
     }
-    // Stop current connection
-    await wa.stop();
-    // Restart
-    setTimeout(() => wa.start(), 2000);
-    sendJSON(res, { ok: true, message: 'Auth cleared. Scan QR at /qr-image in a few seconds.' });
+
+    // 4. Restart WhatsApp connection (will generate fresh QR)
+    setTimeout(async () => {
+      try {
+        await wa.start();
+        console.log('[Reset] WhatsApp restarted — scan QR at /qr-image');
+      } catch (err) {
+        console.error('[Reset] Restart failed:', err.message);
+      }
+    }, 3000);
+
+    sendJSON(res, {
+      ok: true,
+      message: 'Auth cleared. Open /qr-image in 5 seconds and scan the new QR code.'
+    });
   } catch (err) {
+    console.error('[Reset] Error:', err.message);
     sendJSON(res, { error: err.message }, 500);
   }
 });
