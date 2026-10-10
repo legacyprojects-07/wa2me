@@ -1,7 +1,7 @@
 {
-  "name": "whatsapp-nokia-backend",
-  "version": "4.0.0",
-  "description": "Baileys WhatsApp backend for Qt/Symbian — Render PostgreSQL + presence tracking",
+  "name": "openknot-backend",
+  "version": "1.0.0",
+  "description": "OpenKnot Backend based on Baileys",
   "main": "index.js",
   "scripts": {
     "start": "node index.js"
