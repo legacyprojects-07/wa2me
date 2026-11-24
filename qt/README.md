@@ -37,6 +37,14 @@ Qt 4.7.4 or newer: the only modules needed are `QtCore`, `QtGui` (Widgets) and
 
 ### Symbian / Qt 4.7
 
+Symbian has no CMake in its toolchain, so `qt/openknot.pro` is the build entry
+point there (the same sources and defines):
+
+```bash
+qmake -spec symbian-gcce qt/openknot.pro && make      # device
+qmake qt/openknot.pro && make                         # desktop Qt 4.7
+```
+
 ```bash
 # verify the sources only use Qt 4.7.4 API (fetches the qt/qt 4.7 branch for
 # the real headers; no Qt installation needed)

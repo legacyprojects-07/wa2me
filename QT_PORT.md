@@ -294,6 +294,9 @@ which WhatsApp rejects). Good — but three other Symbian hurdles remain:
    have to be cross-compiled for Symbian (armv5/armv6) — but that is one
    dependency instead of four. Proxy mode needs none of them.
 
+**Build:** `qt/openknot.pro` is the qmake project for the Symbian toolchain
+(CMake is used on desktop; the sources are identical).
+
 **Recommendation:** both modes now build against Qt 4.7.4 headers. Ship proxy
 mode if the phone cannot do TLS 1.2 to `web.whatsapp.com`; direct mode otherwise
 (set `OPENKNOT_INSECURE_TLS=1` only if the device root store is too old for
