@@ -60,8 +60,9 @@ BinaryNode buildKeyRequest(const std::string &id, const std::vector<std::string>
 
 struct GroupMember {
     std::string jid;
-    bool admin = false;        // participant type="admin"
-    bool superAdmin = false;   // participant type="superadmin"
+    bool admin;  // participant type="admin"
+    bool superAdmin;  // participant type="superadmin"
+    GroupMember() : admin(false), superAdmin(false) {}
 };
 
 struct GroupInfo {
@@ -136,8 +137,9 @@ bool parseGroupAcceptInvite(const BinaryNode &iq, std::string &groupJid, std::st
 
 struct SendPlan {
     BinaryNode stanza;        // <message> ready for sendNode()
-    bool usedPreKey = false;  // a pkmsg was produced (session was new)
-    size_t deviceCount = 0;
+    bool usedPreKey;  // a pkmsg was produced (session was new)
+    size_t deviceCount;
+    SendPlan() : usedPreKey(false), deviceCount(0) {}
 };
 
 // Encrypts a Message for every bundle and assembles the <message> stanza.
@@ -162,7 +164,8 @@ struct GroupSendPlan {
     BinaryNode stanza;
     Bytes distribution;                     // serialized SKDM that was sent
     std::vector<std::string> distributedTo; // device jids that received it
-    size_t deviceCount = 0;
+    size_t deviceCount;
+    GroupSendPlan() : deviceCount(0) {}
 };
 
 bool buildGroupMessageStanza(signal::Store &sessions, signal::SenderKeyStore &senderKeys,
@@ -197,24 +200,31 @@ struct IncomingMessage {
     std::string id;
     std::string participant;
     std::string pushName;       // stanza attr `notify`
-    bool fromMe = false;
-    bool isGroup = false;
-    uint64_t timestamp = 0;
+    bool fromMe;
+    bool isGroup;
+    uint64_t timestamp;
     waproto::Message message;
     std::string text;
 
     // Set when the message carried a HistorySyncNotification, so the caller can
     // download + decrypt the chunk (wa_history.h).
-    bool hasHistorySync = false;
+    bool hasHistorySync;
     waproto::HistorySyncNotification historySync;
 
     // Set when this message carried a sender-key distribution message that we
     // installed (group messages that follow can then be decrypted).
-    bool receivedSenderKey = false;
+    bool receivedSenderKey;
 
     // Set when an <enc> payload could not be decrypted (retry receipts).
-    bool decrypted = false;
+    bool decrypted;
     std::string error;
+    IncomingMessage()
+        : fromMe(false),
+          isGroup(false),
+          timestamp(0),
+          hasHistorySync(false),
+          receivedSenderKey(false),
+          decrypted(false) {}
 };
 
 // Signal-encrypted messages that also carry a group sender-key distribution

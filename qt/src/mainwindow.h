@@ -37,7 +37,7 @@ class MainWindow : public QMainWindow {
     Q_OBJECT
 public:
     explicit MainWindow(QWidget *parent = nullptr);
-    ~MainWindow() override;
+    ~MainWindow();
 
     void start(const QString &baseUrl, const QString &apiKey, bool directMode);
 
@@ -122,7 +122,7 @@ private:
     // backends
     ApiClient *m_api = nullptr;
     WhatsAppDirect *m_direct = nullptr;
-    bool m_directMode = false;
+    bool m_directMode;
     QString m_pendingCredsPath;
     QPlainTextEdit *m_qrCodeView = 0;   // set while the pairing dialog is open
     QString m_pendingSavePath;          // where toMediaReady() writes the file
@@ -146,5 +146,5 @@ private:
     QList<Chat> m_chats;
     QHash<QString, QList<Message>> m_messages;
     QHash<QString, QListWidgetItem *> m_chatItems;
-    qint64 m_lastSync = 0;
+    qint64 m_lastSync;
 };

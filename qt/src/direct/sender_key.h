@@ -35,21 +35,23 @@ namespace signal {
 // One sender's chain for one group. `signingKey` has a private half only for
 // our own state; for received distributions only the public key is known.
 struct SenderKeyState {
-    uint32_t keyId = 0;
+    uint32_t keyId;
     Bytes chainKey;                    // 32 bytes
-    uint32_t iteration = 0;
+    uint32_t iteration;
     KeyPair signingKey;                // priv 32 / pub 33 (0x05-prefixed)
     std::map<uint32_t, Bytes> skipped; // iteration -> message seed
+    SenderKeyState() : keyId(0), iteration(0) {}
 };
 
 // Signal's SenderKeyDistributionMessage payload (also the WAProto layout of
 // SignalSenderKeyDistributionMessage: 1 id, 2 iteration, 3 chainKey,
 // 4 signingKey).
 struct SenderKeyDistribution {
-    uint32_t id = 0;
-    uint32_t iteration = 0;
+    uint32_t id;
+    uint32_t iteration;
     Bytes chainKey;        // 32
     Bytes signingKey;      // 33 (0x05-prefixed)
+    SenderKeyDistribution() : id(0), iteration(0) {}
 };
 
 // 0x33 || proto{...} — the bytes WhatsApp carries in
@@ -58,10 +60,11 @@ Bytes encodeDistribution(const SenderKeyDistribution &dist);
 bool decodeDistribution(const Bytes &data, SenderKeyDistribution &out, std::string &error);
 
 struct SenderKeyMessage {
-    uint32_t id = 0;
-    uint32_t iteration = 0;
+    uint32_t id;
+    uint32_t iteration;
     Bytes ciphertext;
     Bytes signature;       // 64 (not sent by encodeMessage; appended by encode)
+    SenderKeyMessage() : id(0), iteration(0) {}
 };
 
 // Serialises and signs with our signing private key.

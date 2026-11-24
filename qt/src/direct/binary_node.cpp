@@ -1,4 +1,6 @@
 #include "binary_node.h"
+
+#include "compat.h"
 #include "inflate.h"
 #include "wa_tokens.h"
 
@@ -12,7 +14,7 @@ namespace wa {
 
 // ─── JID helpers ─────────────────────────────────────────────────────────────
 
-std::string numToString(long long v) { return std::to_string(v); }
+std::string numToString(long long v) { return compat::toString(v); }
 
 Jid jidDecode(const std::string &jid) {
     Jid out;
@@ -217,12 +219,12 @@ char unpackNibble(int v) {
     if (v == 10) return '-';
     if (v == 11) return '.';
     if (v == 15) return '\0';
-    throw std::runtime_error("invalid nibble: " + std::to_string(v));
+    throw std::runtime_error("invalid nibble: " + compat::toString(v));
 }
 
 char unpackHex(int v) {
     if (v >= 0 && v < 16) return v < 10 ? char('0' + v) : char('A' + v - 10);
-    throw std::runtime_error("invalid hex: " + std::to_string(v));
+    throw std::runtime_error("invalid hex: " + compat::toString(v));
 }
 
 // ── Encoder ────────────────────────────────────────────────────────────────
@@ -455,7 +457,7 @@ std::string readString(Reader &r, int tag) {
     case NIBBLE_8:
         return readPacked8(r, tag);
     default:
-        throw std::runtime_error("invalid string with tag: " + std::to_string(tag));
+        throw std::runtime_error("invalid string with tag: " + compat::toString(tag));
     }
 }
 
@@ -466,7 +468,7 @@ int readListSize(Reader &r, int tag) {
     case LIST_EMPTY: return 0;
     case LIST_8: return r.byte();
     case LIST_16: return int(r.intN(2));
-    default: throw std::runtime_error("invalid tag for list size: " + std::to_string(tag));
+    default: throw std::runtime_error("invalid tag for list size: " + compat::toString(tag));
     }
 }
 

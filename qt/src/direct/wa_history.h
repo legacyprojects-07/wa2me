@@ -25,9 +25,10 @@ using Bytes = std::vector<uint8_t>;
 struct Chat {
     std::string jid;                       // HistoryConversation.id
     std::string name;                      // group subject / contact name (may be empty)
-    uint32_t unreadCount = 0;
-    uint64_t lastMessageTimestamp = 0;     // conversationTimestamp
+    uint32_t unreadCount;
+    uint64_t lastMessageTimestamp;  // conversationTimestamp
     std::vector<waproto::WebMessageInfo> messages;   // as delivered (newest first)
+    Chat() : unreadCount(0), lastMessageTimestamp(0) {}
 };
 
 struct Contact {
@@ -36,9 +37,9 @@ struct Contact {
 };
 
 struct SyncData {
-    uint32_t syncType = 0;
-    uint32_t chunkOrder = 0;
-    uint32_t progress = 0;                 // 0..100
+    uint32_t syncType;
+    uint32_t chunkOrder;
+    uint32_t progress;  // 0..100
 
     std::vector<Chat> chats;
     std::vector<Contact> contacts;
@@ -48,6 +49,7 @@ struct SyncData {
     void merge(const SyncData &other);
 
     size_t messageCount() const;
+    SyncData() : syncType(0), chunkOrder(0), progress(0) {}
 };
 
 // Decrypts the blob fetched from notification.directPath and inflates it,

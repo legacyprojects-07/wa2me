@@ -1,5 +1,7 @@
 #include "proto_min.h"
 
+#include "compat.h"
+
 #include <cstring>
 
 namespace wa {
@@ -164,13 +166,8 @@ bool decodeCertChainIssuerSerial(const Bytes &certChainBytes, uint64_t &serialOu
             while (details.next(h)) {
                 if (h.number == 1 && h.wireType == 2) {
                     // serial is a string holding a number
-                    std::string s(h.bytes.begin(), h.bytes.end());
-                    try {
-                        serialOut = std::stoull(s);
-                        ok = true;
-                    } catch (...) {
-                        ok = false;
-                    }
+                    const std::string s(h.bytes.begin(), h.bytes.end());
+                    ok = compat::parseUnsigned(s, serialOut);
                 }
             }
         }

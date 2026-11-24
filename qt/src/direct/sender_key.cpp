@@ -1,5 +1,7 @@
 #include "sender_key.h"
 
+#include "compat.h"
+
 #include <cstring>
 #include <sstream>
 
@@ -268,8 +270,8 @@ bool decryptGroup(SenderKeyStore &store, const std::string &groupJid,
         return false;
     }
     if (state.keyId != msg.id) {
-        error = "sender key id mismatch (" + std::to_string(msg.id) + " vs " +
-                std::to_string(state.keyId) + ")";
+        error = "sender key id mismatch (" + compat::toString(msg.id) + " vs " +
+                compat::toString(state.keyId) + ")";
         return false;
     }
     if (!verifySenderKeyMessage(msg, signedPart, state.signingKey.pub, error)) return false;
@@ -279,8 +281,8 @@ bool decryptGroup(SenderKeyStore &store, const std::string &groupJid,
     if (state.iteration > msg.iteration) {
         auto it = state.skipped.find(msg.iteration);
         if (it == state.skipped.end()) {
-            error = "group message iteration " + std::to_string(msg.iteration) +
-                    " is older than the chain (" + std::to_string(state.iteration) +
+            error = "group message iteration " + compat::toString(msg.iteration) +
+                    " is older than the chain (" + compat::toString(state.iteration) +
                     ") and its key is gone";
             return false;
         }

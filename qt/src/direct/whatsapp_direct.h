@@ -48,7 +48,7 @@ class WhatsAppDirect : public QObject {
     Q_OBJECT
 public:
     explicit WhatsAppDirect(QObject *parent = nullptr);
-    ~WhatsAppDirect() override;
+    ~WhatsAppDirect();
 
     // Where credentials are persisted (creds.json equivalent).
     void setCredentialsPath(const QString &path);
@@ -156,18 +156,20 @@ signals:
         QString jid;
         QString text;
         QString msgId;
-        bool isGroup = false;
+        bool isGroup;
         // Media sends carry a fully assembled message (built after the upload
         // completes) instead of `text`.
-        bool isMedia = false;
+        bool isMedia;
         wa::waproto::Message payload;
+    PendingSend() : isGroup(false), isMedia(false) {}
     };
     // An upload in flight: the send waits until the CDN hands back a URL.
     struct PendingUpload {
         PendingSend send;
-        wa::media::Type type = wa::media::Type::Document;
+        wa::media::Type type;
         wa::media::UploadedMedia uploaded;
         wa::media::MediaMeta meta;
+    PendingUpload() : type(wa::media::Type::Document) {}
     };
     // A group administration IQ waiting for its reply.
     struct PendingGroupOp {
@@ -240,8 +242,9 @@ private:
     Message messageModelFor(const wa::messaging::IncomingMessage &in) const;
 
     struct CachedBundles {
-        qint64 fetchedAt = 0;
+        qint64 fetchedAt;
         std::vector<wa::messaging::DeviceBundle> devices;
+    CachedBundles() : fetchedAt(0) {}
     };
 
     std::unique_ptr<CredsStore> m_store;
@@ -264,10 +267,10 @@ private:
     // sender-key-memory, which keeps the distribution fan-out small).
     QHash<QString, QSet<QString> > m_senderKeyMemory;
     QHash<QString, QString> m_senderKeyGroupNames;  // device jid -> group, for memory
-    quint32 m_nextPreKeyId = 1;
-    quint32 m_lastUploadedPreKeyId = 0;
+    quint32 m_nextPreKeyId;
+    quint32 m_lastUploadedPreKeyId;
     wa::history::SyncData m_history;
-    bool m_preKeysUploaded = false;
+    bool m_preKeysUploaded;
 
     QtWsSocket m_socket;   // RFC 6455 over QSslSocket (QWebSocket is Qt 5.3+)
     std::unique_ptr<wa::noise::NoiseHandler> m_noise;
@@ -280,24 +283,24 @@ private:
     QByteArray m_keyEnc;                  // encrypted static from ClientFinish
     QByteArray m_identityPriv, m_identityPub;
     QByteArray m_signedPreKeyPriv, m_signedPreKeyPub, m_signedPreKeySig;
-    quint32 m_signedPreKeyId = 1;
-    quint32 m_registrationId = 0;
+    quint32 m_signedPreKeyId;
+    quint32 m_registrationId;
     QString m_meJid;
     QByteArray m_advSecretKey;
 
-    QString m_browserOs = "Ubuntu";
-    QString m_browserName = "Chrome";
-    bool m_syncFullHistory = true;
-    bool m_markOnlineOnConnect = true;
-    bool m_hasMe = false;
-    bool m_connected = false;
-    bool m_handshakeDone = false;
-    bool m_manualDisconnect = false;
-    int m_reconnectAttempts = 0;
+    QString m_browserOs;
+    QString m_browserName;
+    bool m_syncFullHistory;
+    bool m_markOnlineOnConnect;
+    bool m_hasMe;
+    bool m_connected;
+    bool m_handshakeDone;
+    bool m_manualDisconnect;
+    int m_reconnectAttempts;
 
     // App version reported to the server (Baileys ships a versioned number;
     // update via setAppVersion when WhatsApp revs the web client).
-    quint32 m_appVersionPrimary = 2;
-    quint32 m_appVersionSecondary = 3000;
-    quint32 m_appVersionTertiary = 1035939187;
+    quint32 m_appVersionPrimary;
+    quint32 m_appVersionSecondary;
+    quint32 m_appVersionTertiary;
 };

@@ -36,7 +36,8 @@ struct ContextInfo {
     std::string participant;     // 2
     Bytes quotedMessage;         // 3 (serialized Message)
     std::string remoteJid;       // 4
-    uint64_t expiration = 0;     // 6
+    uint64_t expiration;  // 6
+    ContextInfo() : expiration(0) {}
 };
 
 // Media metadata shared by image/video/audio/document/sticker messages.
@@ -48,23 +49,33 @@ struct MediaInfo {
     std::string caption;         // image 3, video 7, document 20
     std::string title;           // document 3
     Bytes fileSha256;
-    uint64_t fileLength = 0;
-    uint32_t seconds = 0;        // audio/video
-    bool ptt = false;            // audio 6
-    bool gifPlayback = false;    // video 8
-    uint32_t height = 0;
-    uint32_t width = 0;
-    uint32_t pageCount = 0;      // document 6
+    uint64_t fileLength;
+    uint32_t seconds;  // audio/video
+    bool ptt;  // audio 6
+    bool gifPlayback;  // video 8
+    uint32_t height;
+    uint32_t width;
+    uint32_t pageCount;  // document 6
     Bytes mediaKey;
     Bytes fileEncSha256;
     std::string directPath;
     std::string fileName;        // document 8
-    int64_t mediaKeyTimestamp = 0;
+    int64_t mediaKeyTimestamp;
     Bytes jpegThumbnail;         // 16
     ContextInfo contextInfo;     // 17
-    bool hasContextInfo = false;
+    bool hasContextInfo;
 
     bool empty() const { return url.empty() && mediaKey.empty() && !fileLength; }
+    MediaInfo()
+        : fileLength(0),
+          seconds(0),
+          ptt(false),
+          gifPlayback(false),
+          height(0),
+          width(0),
+          pageCount(0),
+          mediaKeyTimestamp(0),
+          hasContextInfo(false) {}
 };
 
 struct Reaction {
@@ -75,21 +86,23 @@ struct Reaction {
 
 struct HistorySyncNotification {
     Bytes fileSha256;            // 1
-    uint64_t fileLength = 0;     // 2
+    uint64_t fileLength;  // 2
     Bytes mediaKey;              // 3
     Bytes fileEncSha256;         // 4
     std::string directPath;      // 5
-    uint32_t syncType = 0;       // 6
-    uint32_t chunkOrder = 0;     // 7
-    uint32_t progress = 0;       // 9
+    uint32_t syncType;  // 6
+    uint32_t chunkOrder;  // 7
+    uint32_t progress;  // 9
     Bytes inlinePayload;         // 11 (initial bootstrap)
+    HistorySyncNotification() : fileLength(0), syncType(0), chunkOrder(0), progress(0) {}
 };
 
 struct MessageKey {
     std::string remoteJid;       // 1
-    bool fromMe = false;         // 2
+    bool fromMe;  // 2
     std::string id;              // 3
     std::string participant;     // 4
+    MessageKey() : fromMe(false) {}
 };
 
 // Message.senderKeyDistributionMessage (field 2): the group's jid plus the
@@ -102,32 +115,40 @@ struct SenderKeyDistributionInfo {
 // The parts of a Message the client renders.
 struct Message {
     std::string conversation;    // 1
-    bool hasSenderKeyDistribution = false;
+    bool hasSenderKeyDistribution;
     SenderKeyDistributionInfo senderKeyDistribution;   // 2
-    bool hasExtendedText = false;
+    bool hasExtendedText;
     std::string extendedText;    // 6.text
     MediaInfo image;             // 3
     MediaInfo video;             // 9
     MediaInfo audio;             // 8
     MediaInfo document;          // 7
     MediaInfo sticker;           // 26
-    bool hasProtocolMessage = false;
+    bool hasProtocolMessage;
     MessageKey protocolKey;      // 12.key
-    uint32_t protocolType = 0;   // 12.type
+    uint32_t protocolType;  // 12.type
     HistorySyncNotification historySync; // 12.historySyncNotification
-    bool hasHistorySync = false;
-    bool hasReaction = false;
+    bool hasHistorySync;
+    bool hasReaction;
     Reaction reaction;           // 46
 
     // Sent-by-us copies are wrapped as deviceSentMessage{destinationJid,
     // message} so our other devices can re-deliver them to the right chat.
-    bool hasDeviceSent = false;
+    bool hasDeviceSent;
     std::string deviceSentDestinationJid;   // 31.1
     Bytes deviceSentPayload;                // 31.2 (serialized Message)
 
     // Highest-level text for list rendering.
     std::string text() const;
     std::string mediaType() const;   // "image" | "video" | ... | ""
+    Message()
+        : hasSenderKeyDistribution(false),
+          hasExtendedText(false),
+          hasProtocolMessage(false),
+          protocolType(0),
+          hasHistorySync(false),
+          hasReaction(false),
+          hasDeviceSent(false) {}
 };
 
 // ── WebMessageInfo / HistorySync ─────────────────────────────────────────
@@ -135,21 +156,23 @@ struct Message {
 struct WebMessageInfo {
     MessageKey key;
     Message message;
-    bool hasMessage = false;
-    uint64_t messageTimestamp = 0;
+    bool hasMessage;
+    uint64_t messageTimestamp;
     std::string participant;
     std::string pushName;
-    uint32_t status = 0;
+    uint32_t status;
+    WebMessageInfo() : hasMessage(false), messageTimestamp(0), status(0) {}
 };
 
 struct HistoryConversation {
     std::string id;
     std::string name;
     std::string newJid;
-    uint32_t unreadCount = 0;
-    uint64_t lastMsgTimestamp = 0;
-    uint64_t conversationTimestamp = 0;
+    uint32_t unreadCount;
+    uint64_t lastMsgTimestamp;
+    uint64_t conversationTimestamp;
     std::vector<WebMessageInfo> messages;
+    HistoryConversation() : unreadCount(0), lastMsgTimestamp(0), conversationTimestamp(0) {}
 };
 
 struct HistoryPushname {
@@ -158,12 +181,13 @@ struct HistoryPushname {
 };
 
 struct HistorySync {
-    uint32_t syncType = 0;
-    uint32_t chunkOrder = 0;
-    uint32_t progress = 0;
+    uint32_t syncType;
+    uint32_t chunkOrder;
+    uint32_t progress;
     std::vector<HistoryConversation> conversations;
     std::vector<HistoryPushname> pushnames;
     std::map<std::string, std::string> phoneToLid;   // 15
+    HistorySync() : syncType(0), chunkOrder(0), progress(0) {}
 };
 
 // ── Codec ─────────────────────────────────────────────────────────────────
@@ -182,15 +206,20 @@ bool decodeHistorySyncNotification(const Bytes &data, HistorySyncNotification &o
 // registration id, identity key and pre-keys.
 struct RemoteBundle {
     std::string jid;
-    uint32_t registrationId = 0;
+    uint32_t registrationId;
     Bytes identityKey;              // 33 bytes (0x05 prefix)
-    uint32_t signedPreKeyId = 0;
+    uint32_t signedPreKeyId;
     Bytes signedPreKeyPublic;       // 33 bytes
     Bytes signedPreKeySignature;    // 64 bytes
-    bool hasOneTimePreKey = false;
-    uint32_t oneTimePreKeyId = 0;
+    bool hasOneTimePreKey;
+    uint32_t oneTimePreKeyId;
     Bytes oneTimePreKeyPublic;      // 33 bytes
     std::vector<std::string> deviceJids;
+    RemoteBundle()
+        : registrationId(0),
+          signedPreKeyId(0),
+          hasOneTimePreKey(false),
+          oneTimePreKeyId(0) {}
 };
 
 // ── Padding (message payloads are PKCS#7-padded to 16 bytes) ─────────────

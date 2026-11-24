@@ -82,19 +82,20 @@ runtime switch (`--direct` or *Connection ▸ Direct WhatsApp Web mode*).
 
 ## 5. Blockers you will hit (honest list)
 
-1. **C++11 completeness.** The sources are written for C++11 and are clean on
-   GCC ≥ 4.7. GCGE is **4.6.3**, which does not have:
-   * non-static data member initialisers (`int device = -1;` in a struct) —
-     ~190 sites across 16 headers,
-   * the `override` keyword,
-   * `std::to_string` / `std::stoi` / `std::stoull` (libstdc++ has them from 4.9),
-   * `std::chrono::high_resolution_clock` (only used as a fallback RNG seed).
+1. ~~C++11 completeness.~~ **Done.** GCGE is 4.6.3, which lacks non-static
+   data member initialisers, `override`, `std::to_string`/`stoi`/`stoull` and
+   `<chrono`. The sources now avoid all of them:
+   * every struct/class initialises its members in a constructor instead of in
+     the declaration (~190 sites across 16 headers),
+   * `override` is gone,
+   * `src/direct/compat.h` provides `compat::toString()` / `parseUnsigned()` /
+     `hexNibble()` / `clockTicks()` to stand in for the C++11 string
+     conversions and the `<chrono>` seed,
+   * the qmake project builds with `-std=c++0x` (GCC 4.6 does not know
+     `-std=c++11`).
 
-   So on the Symbian compiler the first `make` stops in the first header.
-   Removing them is mechanical (explicit constructors instead of NSDMI,
-   `override` dropped, `to_string`/`stoi`/`stoull` shims, `time(nullptr)` for
-   the seed) and the host test suite stays the guard rail — but it has **not**
-   been done yet.
+   `qt/tests/gcc46_check.sh` is the gate: it greps the sources for anything
+   GCC 4.6 rejects and compiles the protocol core with `-std=c++0x`.
 
 2. **OpenSSL in the Qt build.** Nokia's *Qt 4.7.4 for Symbian* ships with SSL
    enabled; a self-built Qt without `-openssl` gives you a device that can run

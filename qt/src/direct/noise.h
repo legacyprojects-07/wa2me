@@ -82,10 +82,10 @@ private:
     Bytes encKey_;
     Bytes decKey_;
 
-    uint32_t readCounter_ = 0;
-    uint32_t writeCounter_ = 0;
-    bool finished_ = false;
-    bool sentIntro_ = false;
+    uint32_t readCounter_;
+    uint32_t writeCounter_;
+    bool finished_;
+    bool sentIntro_;
 
     Bytes inBytes_;
 };

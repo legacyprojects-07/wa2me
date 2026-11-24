@@ -41,7 +41,8 @@ bool curveSharedKey(const Bytes &priv, const Bytes &pub, Bytes &out) {
 
 NoiseHandler::NoiseHandler(Bytes ephPriv, Bytes ephPub, Bytes routingInfo)
     : ephPriv_(std::move(ephPriv)), ephPub_(std::move(ephPub)),
-      routingInfo_(std::move(routingInfo)) {
+      routingInfo_(std::move(routingInfo)), readCounter_(0), writeCounter_(0),
+      finished_(false), sentIntro_(false) {
     // Baileys: hash = NOISE_MODE.byteLength === 32 ? NOISE_MODE : sha256(NOISE_MODE).
     // "Noise_XX_25519_AESGCM_SHA256" is 28 chars + 4 NULs = exactly 32 bytes,
     // so the mode string is used directly as the initial hash.

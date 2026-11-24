@@ -46,18 +46,19 @@ private:
 // ── Generic reader ─────────────────────────────────────────────────────────
 
 struct Field {
-    uint32_t number = 0;
-    uint32_t wireType = 0;
-    uint64_t varint = 0;
+    uint32_t number;
+    uint32_t wireType;
+    uint64_t varint;
     Bytes bytes;
-    size_t start = 0;   // offset of the field's payload (for embedded messages)
-    size_t end = 0;
+    size_t start;  // offset of the field's payload (for embedded messages)
+    size_t end;
+    Field() : number(0), wireType(0), varint(0), start(0), end(0) {}
 };
 
 class Reader {
 public:
-    explicit Reader(const Bytes &data) : data_(data) {}
-    Reader(const uint8_t *data, size_t len) : data_(data, data + len) {}
+    explicit Reader(const Bytes &data) : data_(data), pos_(0) {}
+    Reader(const uint8_t *data, size_t len) : data_(data, data + len), pos_(0) {}
 
     bool next(Field &out);
     bool atEnd() const { return pos_ >= data_.size(); }
@@ -70,7 +71,7 @@ public:
 private:
     bool readVarint(uint64_t &v);
     Bytes data_;
-    size_t pos_ = 0;
+    size_t pos_;
 };
 
 // ── HandshakeMessage (WAProto.proto:1459) ─────────────────────────────────
@@ -98,9 +99,10 @@ Bytes encodeClientFinish(const ClientFinish &finish);
 
 // ── CertChain (WAProto.proto) ─────────────────────────────────────────────
 struct CertChainDetails {
-    bool ok = false;
-    uint64_t serial = 0;
+    bool ok;
+    uint64_t serial;
     std::string issuerSerialRaw;
+    CertChainDetails() : ok(false), serial(0) {}
 };
 
 bool decodeCertChainIssuerSerial(const Bytes &certChainBytesFromNoise,
@@ -109,24 +111,37 @@ bool decodeCertChainIssuerSerial(const Bytes &certChainBytesFromNoise,
 // ── ClientPayload (WAProto.proto:774) ─────────────────────────────────────
 
 struct AppVersion {
-    uint32_t primary = 0;
-    uint32_t secondary = 0;
-    uint32_t tertiary = 0;
+    uint32_t primary;
+    uint32_t secondary;
+    uint32_t tertiary;
+    AppVersion() : primary(0), secondary(0), tertiary(0) {}
+    AppVersion(uint32_t p, uint32_t s, uint32_t t)
+        : primary(p), secondary(s), tertiary(t) {}
 };
 
 struct UserAgent {
-    uint32_t platform = 1;          // WEB
+    uint32_t platform;  // WEB
     AppVersion appVersion;
-    std::string mcc = "000";
-    std::string mnc = "000";
-    std::string osVersion = "0.1";
+    std::string mcc;
+    std::string mnc;
+    std::string osVersion;
     std::string manufacturer;
-    std::string device = "Desktop";
-    std::string osBuildNumber = "0.1";
+    std::string device;
+    std::string osBuildNumber;
     std::string phoneId;
-    uint32_t releaseChannel = 0;    // RELEASE
-    std::string localeLanguageIso6391 = "en";
-    std::string localeCountryIso31661Alpha2 = "US";
+    uint32_t releaseChannel;  // RELEASE
+    std::string localeLanguageIso6391;
+    std::string localeCountryIso31661Alpha2;
+    UserAgent()
+        : platform(1),
+          mcc("000"),
+          mnc("000"),
+          osVersion("0.1"),
+          device("Desktop"),
+          osBuildNumber("0.1"),
+          releaseChannel(0),
+          localeLanguageIso6391("en"),
+          localeCountryIso31661Alpha2("US") {}
 };
 
 struct DevicePairingData {
@@ -141,38 +156,62 @@ struct DevicePairingData {
 };
 
 struct ClientPayload {
-    uint64_t username = 0;       // set when logging in (existing session)
+    uint64_t username;  // set when logging in (existing session)
     // Baileys builds these payloads from an object literal, so fields that are
     // present are serialised even when zero. These flags mirror that.
-    bool hasPassive = true;
-    bool passive = false;
-    bool hasPull = true;
-    bool pull = false;
-    bool hasDevice = false;
-    uint32_t device = 0;
-    uint32_t connectType = 1;    // WIFI_UNKNOWN
-    uint32_t connectReason = 1;  // USER_ACTIVATED
-    bool hasUserAgent = true;
+    bool hasPassive;
+    bool passive;
+    bool hasPull;
+    bool pull;
+    bool hasDevice;
+    uint32_t device;
+    uint32_t connectType;  // WIFI_UNKNOWN
+    uint32_t connectReason;  // USER_ACTIVATED
+    bool hasUserAgent;
     UserAgent userAgent;
-    uint32_t webSubPlatform = 0; // WEB_BROWSER
-    bool hasDevicePairingData = false;
+    uint32_t webSubPlatform;  // WEB_BROWSER
+    bool hasDevicePairingData;
     DevicePairingData devicePairingData;
+    ClientPayload()
+        : username(0),
+          hasPassive(true),
+          passive(false),
+          hasPull(true),
+          pull(false),
+          hasDevice(false),
+          device(0),
+          connectType(1),
+          connectReason(1),
+          hasUserAgent(true),
+          webSubPlatform(0),
+          hasDevicePairingData(false) {}
 };
 
 Bytes encodeClientPayload(const ClientPayload &payload);
 
 // DeviceProps (WAProto.proto:1271) — embedded in DevicePairingData.
 struct HistorySyncConfig {
-    uint32_t storageQuotaMb = 10240;
-    bool inlineInitialPayloadInE2EeMsg = true;
-    bool supportCallLogHistory = false;
-    bool supportBotUserAgentChatHistory = true;
-    bool supportCagReactionsAndPolls = true;
-    bool supportBizHostedMsg = true;
-    bool supportRecentSyncChunkMessageCountTuning = true;
-    bool supportHostedGroupMsg = true;
-    bool supportFbidBotChatHistory = true;
-    bool supportMessageAssociation = true;
+    uint32_t storageQuotaMb;
+    bool inlineInitialPayloadInE2EeMsg;
+    bool supportCallLogHistory;
+    bool supportBotUserAgentChatHistory;
+    bool supportCagReactionsAndPolls;
+    bool supportBizHostedMsg;
+    bool supportRecentSyncChunkMessageCountTuning;
+    bool supportHostedGroupMsg;
+    bool supportFbidBotChatHistory;
+    bool supportMessageAssociation;
+    HistorySyncConfig()
+        : storageQuotaMb(10240),
+          inlineInitialPayloadInE2EeMsg(true),
+          supportCallLogHistory(false),
+          supportBotUserAgentChatHistory(true),
+          supportCagReactionsAndPolls(true),
+          supportBizHostedMsg(true),
+          supportRecentSyncChunkMessageCountTuning(true),
+          supportHostedGroupMsg(true),
+          supportFbidBotChatHistory(true),
+          supportMessageAssociation(true) {}
 };
 
 Bytes encodeDeviceProps(const std::string &os, uint32_t platformType,

@@ -1,5 +1,7 @@
 #include "sha256.h"
 
+#include "compat.h"
+
 #include <cstring>
 #include <random>
 #include <chrono>
@@ -235,9 +237,11 @@ Bytes randomBytes(size_t n) {
     } catch (...) {
         // random_device may throw on some toolchains; fall through to timing.
     }
-    const auto now = std::chrono::high_resolution_clock::now().time_since_epoch().count();
-    seed.insert(seed.end(), reinterpret_cast<const uint8_t *>(&now),
-                reinterpret_cast<const uint8_t *>(&now) + sizeof(now));
+    // <chrono> is missing on older toolchains (GCC 4.6 on Symbian); the clock
+    // and the address below are mixed into the hash, so the quality is the same.
+    const unsigned long long ticks = compat::clockTicks();
+    seed.insert(seed.end(), reinterpret_cast<const uint8_t *>(&ticks),
+                reinterpret_cast<const uint8_t *>(&ticks) + sizeof(ticks));
     static volatile uintptr_t addressEntropy = 0;
     const uintptr_t addr = reinterpret_cast<uintptr_t>(&addressEntropy);
     seed.insert(seed.end(), reinterpret_cast<const uint8_t *>(&addr),
@@ -268,8 +272,11 @@ std::string toHex(const Bytes &b) {
 
 Bytes fromHex(const std::string &hex) {
     Bytes out;
+    out.reserve(hex.size() / 2);
     for (size_t i = 0; i + 1 < hex.size(); i += 2) {
-        out.push_back(uint8_t(std::stoi(hex.substr(i, 2), nullptr, 16)));
+        const int hi = compat::hexNibble(hex[i]);
+        const int lo = compat::hexNibble(hex[i + 1]);
+        out.push_back(uint8_t(((hi < 0 ? 0 : hi) << 4) | (lo < 0 ? 0 : lo)));
     }
     return out;
 }

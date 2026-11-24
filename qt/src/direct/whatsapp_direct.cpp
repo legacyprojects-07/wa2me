@@ -54,16 +54,16 @@ class WhatsAppDirect::CredsStore : public wa::signal::Store {
 public:
     explicit CredsStore(WhatsAppDirect *owner) : q(owner) {}
 
-    wa::signal::KeyPair ourIdentity() override {
+    wa::signal::KeyPair ourIdentity() {
         wa::signal::KeyPair kp;
         kp.priv = toStd(q->m_identityPriv);
         kp.pub = withPrefix(toStd(q->m_identityPub));
         return kp;
     }
 
-    uint32_t ourRegistrationId() override { return q->m_registrationId; }
+    uint32_t ourRegistrationId() { return q->m_registrationId; }
 
-    bool loadPreKey(uint32_t id, wa::signal::KeyPair &out) override {
+    bool loadPreKey(uint32_t id, wa::signal::KeyPair &out) {
         for (const QJsonValue &v : q->m_preKeys) {
             const QJsonObject o = v.toObject();
             if (quint32(o.value("id").toInt()) != id) continue;
@@ -74,7 +74,7 @@ public:
         return false;
     }
 
-    void removePreKey(uint32_t id) override {
+    void removePreKey(uint32_t id) {
         QJsonArray kept;
         for (const QJsonValue &v : q->m_preKeys) {
             if (quint32(v.toObject().value("id").toInt()) != id) kept.append(v);
@@ -83,14 +83,14 @@ public:
         q->saveCredentials();
     }
 
-    bool loadSignedPreKey(uint32_t id, wa::signal::KeyPair &out) override {
+    bool loadSignedPreKey(uint32_t id, wa::signal::KeyPair &out) {
         Q_UNUSED(id)
         out.priv = toStd(q->m_signedPreKeyPriv);
         out.pub = withPrefix(toStd(q->m_signedPreKeyPub));
         return out.priv.size() == 32;
     }
 
-    wa::signal::Record loadSession(const std::string &address) override {
+    wa::signal::Record loadSession(const std::string &address) {
         wa::signal::Record record;
         const QJsonValue v = q->m_sessions.value(QString::fromStdString(address));
         if (v.isString()) {
@@ -103,7 +103,7 @@ public:
         return record;
     }
 
-    void storeSession(const std::string &address, const wa::signal::Record &record) override {
+    void storeSession(const std::string &address, const wa::signal::Record &record) {
         q->m_sessions[QString::fromStdString(address)] = QString::fromStdString(
             wa::crypto::toHex(wa::signal::serializeRecord(record)));
         q->saveCredentials();
@@ -133,13 +133,13 @@ class WhatsAppDirect::SenderKeysStore : public wa::signal::SenderKeyStore {
 public:
     explicit SenderKeysStore(WhatsAppDirect *owner) : q(owner) {}
 
-    bool loadSenderKey(const std::string &name, wa::signal::SenderKeyState &out) override {
+    bool loadSenderKey(const std::string &name, wa::signal::SenderKeyState &out) {
         const QJsonValue v = q->m_senderKeyJson.value(QString::fromStdString(name));
         if (!v.isString()) return false;
         return wa::signal::deserializeSenderKeyState(v.toString().toStdString(), out);
     }
 
-    void storeSenderKey(const std::string &name, const wa::signal::SenderKeyState &state) override {
+    void storeSenderKey(const std::string &name, const wa::signal::SenderKeyState &state) {
         q->m_senderKeyJson[QString::fromStdString(name)] =
             QString::fromStdString(wa::signal::serializeSenderKeyState(state));
         q->saveCredentials();
@@ -149,7 +149,24 @@ private:
     WhatsAppDirect *q;
 };
 
-WhatsAppDirect::WhatsAppDirect(QObject *parent) : QObject(parent) {
+WhatsAppDirect::WhatsAppDirect(QObject *parent)
+    : m_nextPreKeyId(1),
+      m_lastUploadedPreKeyId(0),
+      m_preKeysUploaded(false),
+      m_signedPreKeyId(1),
+      m_registrationId(0),
+      m_browserOs("Ubuntu"),
+      m_browserName("Chrome"),
+      m_syncFullHistory(true),
+      m_markOnlineOnConnect(true),
+      m_hasMe(false),
+      m_connected(false),
+      m_handshakeDone(false),
+      m_manualDisconnect(false),
+      m_reconnectAttempts(0),
+      m_appVersionPrimary(2),
+      m_appVersionSecondary(3000),
+      m_appVersionTertiary(1035939187) {
     m_keepAlive.setInterval(30000);   // keepAliveIntervalMs
     connect(&m_keepAlive, SIGNAL(timeout()), this, SLOT(sendKeepAlive()));
 

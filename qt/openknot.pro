@@ -15,8 +15,11 @@ CONFIG  += warn_on
 CONFIG  -= app_bundle
 CONFIG  -= qtquick
 
-# The protocol core is C++11-clean on purpose (Symbian ships GCC 4.x).
-QMAKE_CXXFLAGS += -std=c++11
+# The protocol core sticks to the C++11 subset that GCC 4.6 understands (the
+# Symbian GCGE is 4.6.3), which is why the flag is spelled c++0x here:
+# -std=c++11 is an unknown option to that compiler. GCC 4.7+ accepts c++0x too.
+# tests/gcc46_check.sh is the gate that keeps it that way.
+QMAKE_CXXFLAGS += -std=c++0x
 
 INCLUDEPATH += src src/direct src/qt4compat
 
@@ -27,6 +30,7 @@ HEADERS += \
     src/qt4compat/json.h \
     src/qt4compat/qt4compat.h \
     src/qt4compat/websocket.h \
+    src/direct/compat.h \
     src/direct/wa_tokens.h \
     src/direct/binary_node.h \
     src/direct/inflate.h \

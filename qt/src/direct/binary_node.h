@@ -30,9 +30,10 @@ namespace wa {
 struct Jid {
     std::string user;
     std::string server;
-    int device = -1;   // -1 = absent  (":" in the user part)
-    int agent = -1;    // -1 = absent  ("_" in the user part)
-    bool valid = false;
+    int device;  // -1 = absent  (":" in the user part)
+    int agent;  // -1 = absent  ("_" in the user part)
+    bool valid;
+    Jid() : device(-1), agent(-1), valid(false) {}
 };
 
 Jid jidDecode(const std::string &jid);
@@ -57,15 +58,15 @@ struct BinaryNode {
     // Baileys, which serialises attributes in object-key order.
     std::vector<std::pair<std::string, std::string>> attrs;
 
-    Content contentType = Content::None;
+    Content contentType;
     std::string text;                  // Content::Text
     std::vector<uint8_t> bytes;        // Content::Bytes
     std::vector<BinaryNode> children;  // Content::List
 
-    BinaryNode() = default;
-    explicit BinaryNode(std::string t) : tag(std::move(t)) {}
+    BinaryNode() : contentType(Content::None) {}
+    explicit BinaryNode(std::string t) : contentType(Content::None), tag(std::move(t)) {}
     BinaryNode(std::string t, std::vector<std::pair<std::string, std::string>> a)
-        : tag(std::move(t)), attrs(std::move(a)) {}
+        : contentType(Content::None), tag(std::move(t)), attrs(std::move(a)) {}
 
     // Attribute helpers (set/get/replace, order-preserving).
     const std::string *attr(const std::string &key) const;
@@ -97,9 +98,10 @@ std::vector<uint8_t> encode(const BinaryNode &node);
 std::vector<uint8_t> encodePayload(const BinaryNode &node);
 
 struct DecodeResult {
-    bool ok = false;
+    bool ok;
     BinaryNode node;
     std::string error;
+    DecodeResult() : ok(false) {}
 };
 
 // Decodes a complete frame (flag byte + payload). `consumed` receives the

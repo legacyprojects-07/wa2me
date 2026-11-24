@@ -36,10 +36,11 @@ using Bytes = std::vector<uint8_t>;
 struct MediaConn {
     std::string auth;
     std::string hostname;   // first <host hostname="…"/>
-    int ttlSeconds = 0;
-    int64_t fetchedAt = 0;  // unix seconds
+    int ttlSeconds;
+    int64_t fetchedAt;  // unix seconds
 
     bool usable(int64_t now) const { return !hostname.empty() && now < fetchedAt + ttlSeconds; }
+    MediaConn() : ttlSeconds(0), fetchedAt(0) {}
 };
 
 // <iq type=set xmlns="w:m" id=…><media_conn/></iq>
@@ -61,10 +62,11 @@ struct UploadedMedia {
     Bytes fileSha256;      // SHA-256 of the plaintext
     Bytes fileEncSha256;   // SHA-256 of ciphertext||mac (what the CDN is keyed by)
     Bytes blob;            // what gets POSTed
-    size_t fileLength = 0;
+    size_t fileLength;
     std::string directPath;   // filled in from the upload response
     std::string url;          // filled in from the upload response
-    int64_t mediaKeyTimestamp = 0;
+    int64_t mediaKeyTimestamp;
+    UploadedMedia() : fileLength(0), mediaKeyTimestamp(0) {}
 };
 
 // Encrypt-only half of an upload (no network): derive keys, CBC-encrypt, hash.
@@ -81,10 +83,11 @@ struct MediaMeta {
     std::string fileName;      // documents
     std::string caption;
     std::string title;         // documents (defaults to the file name)
-    uint32_t seconds = 0;
-    bool ptt = false;
-    uint32_t height = 0;
-    uint32_t width = 0;
+    uint32_t seconds;
+    bool ptt;
+    uint32_t height;
+    uint32_t width;
+    MediaMeta() : seconds(0), ptt(false), height(0), width(0) {}
 };
 
 // Duration of an Ogg/Opus file in seconds, read from the last Ogg page's

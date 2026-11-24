@@ -31,7 +31,11 @@
 #include "api_client.h"          // also brings in the QJson* shim + Qt4 helpers
 #include "direct/whatsapp_direct.h"
 
-MainWindow::MainWindow(QWidget *parent) : QMainWindow(parent) {
+MainWindow::MainWindow(QWidget *parent)
+    : QMainWindow(parent),
+      m_directMode(false),
+      m_baseUrl("http://127.0.0.1:3000"),
+      m_lastSync(0) {
     m_api = new ApiClient(this);
     m_direct = new WhatsAppDirect(this);
 

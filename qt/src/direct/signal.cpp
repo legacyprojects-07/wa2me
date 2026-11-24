@@ -1,5 +1,7 @@
 #include "signal.h"
 
+#include "compat.h"
+
 #include <cstring>
 #include <stdexcept>
 
@@ -541,7 +543,7 @@ bool decrypt(Store &store, const std::string &address, int type, const Bytes &bo
         }
 
         if (type != 3) {
-            error = "unsupported ciphertext type " + std::to_string(type);
+            error = "unsupported ciphertext type " + compat::toString(type);
             return false;
         }
 
@@ -583,7 +585,7 @@ bool decrypt(Store &store, const std::string &address, int type, const Bytes &bo
         }
         KeyPair signedPreKeyPair;
         if (!store.loadSignedPreKey(pre.signedPreKeyId, signedPreKeyPair)) {
-            error = "missing signed pre-key " + std::to_string(pre.signedPreKeyId);
+            error = "missing signed pre-key " + compat::toString(pre.signedPreKeyId);
             return false;
         }
 

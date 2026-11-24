@@ -51,8 +51,11 @@ qmake qt/openknot.pro && make                         # desktop Qt 4.7
 ./qt/tests/qt4_check.sh
 ```
 
-The protocol code is C++11-clean (Symbian ships GCC 4.x); CMake defaults to
-C++17 on desktop and honours `-DCMAKE_CXX_STANDARD=11` for device builds.
+The protocol code sticks to the C++11 subset **GCC 4.6** (the Symbian GCGE)
+understands — no member initialisers in declarations, no `override`, no
+`std::to_string`/`stoi`, no `<chrono>`; `src/direct/compat.h` fills those gaps.
+`./qt/tests/gcc46_check.sh` enforces it. CMake defaults to C++17 on desktop and
+honours `-DCMAKE_CXX_STANDARD=11` for device builds.
 Direct mode needs TLS from the platform (Qt 4.7's `QSslSocket`); if the phone's
 root store is too old for WhatsApp's certificate chain you can opt in to
 ignoring certificate errors with `OPENKNOT_INSECURE_TLS=1`.
@@ -119,6 +122,7 @@ tests/
   test_media.cpp        upload/download crypto+URLs vs Baileys encryptedStream()
   test_qt4compat.cpp    Qt 4-only: JSON shim round-trips (creds.json)
   qt4_check.sh          compiles every Qt source against real Qt 4.7.4 headers
+  gcc46_check.sh        rejects anything the Symbian GCC 4.6.3 cannot compile
   verify_signal.mjs     phase 2 of test_signal (decrypts/encrypts via libsignal)
   verify_message.mjs    phase 2 of test_message (decodes the stanza, replies)
   verify_group.mjs      phase 2 of test_sender_key (GroupCipher decrypt/reply)
