@@ -9,6 +9,15 @@
 //     QDateTime/QNetworkReply spellings used below
 #pragma once
 
+// Toolchain floor: this project is C++11. GCC 4.6 is the oldest compiler known
+// to handle it (Symbian GCGE 4.6.3); GCC 4.4 (MinGW in the Qt Simulator kit of
+// the Qt SDK) has no nullptr, lambdas, auto, range-for or enum class.
+#if defined(__GNUC__) && !defined(__clang__) && \
+    (__GNUC__ < 4 || (__GNUC__ == 4 && __GNUC_MINOR__ < 6))
+#  error "openknot-qt needs GCC 4.6 or newer (Symbian GCGE 4.6.3, MinGW 4.9+, GCC 5+). This kit's GCC is too old - select the Symbian Device kit, or build the desktop version with Qt 5."
+#endif
+
+
 #include <QDateTime>
 #include <QNetworkReply>
 #include <QObject>

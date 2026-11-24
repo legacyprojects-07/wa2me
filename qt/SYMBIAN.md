@@ -182,3 +182,57 @@ runtime switch (`--direct` or *Connection ▸ Direct WhatsApp Web mode*).
 
 4. **Build system.** CMake is not part of SBSv2, which is why `openknot.pro`
    exists; it builds exactly the same source list as `qt/CMakeLists.txt`.
+
+## 7. Troubleshooting
+
+### `nullptr was not declared`, `ISO C++ forbids initialization of member`, `::swprintf has not been declared`
+
+You are building the **Qt Simulator (desktop) target**, not Symbian. The build
+log gives it away:
+
+```
+...\Symbilink-build-simulator-Simulator_Qt_for_MinGW_4_4__Qt_SDK__Debug\
+g++ ... -std=gnu++0x ...        c:\QtSDK\mingw\...\mingw32\4.4.0\include
+```
+
+The SDK's simulator/desktop Qt 4.7.4 is compiled with **MinGW GCC 4.4**, a
+C++98 compiler — no `nullptr`, lambdas, `auto`, range-`for` or `enum class`.
+This client is C++11 and needs GCC ≥ 4.6, i.e. the **Symbian Device** kit
+(GCGE 4.6.3).
+
+Fix: in the **Projects** pane, switch the active target from *Qt Simulator* to
+**Symbian Device** (or use the kit selector above the Run button). The shadow
+build directory then becomes `...-build-symbian-Symbian_Device-...` and the
+build runs `arm-none-symbianelf-g++`.
+
+`openknot.pro` now refuses to configure for a compiler older than GCC 4.6 with
+a single error, so a wrong kit is obvious immediately instead of producing a
+screenful of template errors.
+
+If there is **no** Symbian target in the kit list, the SDK was installed
+without it: run `C:\QtSDK\MaintenanceTool.exe` (or the SDK installer) and add
+**Qt 4.7.4 for Symbian** plus its toolchain (the installer also wants the
+Symbian SDK / CODA for on-device deploy).
+
+Note on the `::swprintf` error specifically: that one is a libstdc++ 4.4 quirk
+with the *strict* `-std=c++0x` dialect. The project now uses `-std=gnu++0x`,
+which keeps those C99 declarations visible — but GCC 4.4 still cannot compile
+the client.
+
+### I want to try the UI on the PC first
+
+Don't use the Qt Simulator. Build the desktop version with Qt 5 (or 6):
+
+```bash
+cmake -S qt -B build/qt && cmake --build build/qt
+```
+
+or open `qt/CMakeLists.txt` in Qt Creator with a Qt 5 kit. Same sources, same
+features; only the Qt-version-specific bits differ (the `qt4compat/` shims are
+compiled out on Qt 5+).
+
+### The package is called `openknot-qt.sis` but my project is "Symbilink"
+
+`TARGET` in the `.pro` decides the binary/package name: set `TARGET =
+Symbilink` (and keep `TARGET.UID3` unique to your app). Renaming the `.pro`
+only changes the Qt Creator project name.

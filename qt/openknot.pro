@@ -19,7 +19,23 @@ CONFIG  -= qtquick
 # Symbian GCGE is 4.6.3), which is why the flag is spelled c++0x here:
 # -std=c++11 is an unknown option to that compiler. GCC 4.7+ accepts c++0x too.
 # tests/gcc46_check.sh is the gate that keeps it that way.
-QMAKE_CXXFLAGS += -std=c++0x
+#
+# gnu++0x (not c++0x) on purpose: the strict dialect turns off the C99
+# declarations in old libstdc++ headers, which makes <cwchar> fail with
+# "'::swprintf' has not been declared" on MinGW/Qt 4.x.
+QMAKE_CXXFLAGS += -std=gnu++0x
+
+# Fail early on the wrong kit. The Qt Simulator / desktop Qt 4.7.4 target of the
+# Qt SDK ships MinGW GCC 4.4, which has no nullptr, lambdas, auto or enum class:
+# without this you get a few hundred incomprehensible errors.
+greaterThan(QT_GCC_MAJOR_VERSION, 0) {
+    equals(QT_GCC_MAJOR_VERSION, 4):lessThan(QT_GCC_MINOR_VERSION, 6) {
+        error("openknot-qt needs GCC 4.6 or newer, but this kit uses GCC $$QT_GCC_MAJOR_VERSION.$$QT_GCC_MINOR_VERSION. Select the Symbian Device kit (GCGE 4.6.3), or build the desktop version with Qt 5.")
+    }
+    lessThan(QT_GCC_MAJOR_VERSION, 4) {
+        error("openknot-qt needs GCC 4.6 or newer, but this kit uses GCC $$QT_GCC_MAJOR_VERSION.$$QT_GCC_MINOR_VERSION. Select the Symbian Device kit.")
+    }
+}
 
 INCLUDEPATH += src src/direct src/qt4compat
 
