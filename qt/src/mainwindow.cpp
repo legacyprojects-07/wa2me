@@ -78,6 +78,9 @@ MainWindow::MainWindow(QWidget *parent) : QMainWindow(parent) {
             SLOT(onGroupNotification(QString,QString,QString)));
     connect(m_api, SIGNAL(groupActionDone(QString,QJsonObject)), this,
             SLOT(onGroupActionDone(QString,QJsonObject)));
+    // Metadata answers: REST emits groupReady() too, so one slot serves both.
+    connect(m_api, SIGNAL(groupReady(GroupInfo)), this, SLOT(onGroupReady(GroupInfo)));
+    connect(m_direct, SIGNAL(groupReady(GroupInfo)), this, SLOT(onGroupReady(GroupInfo)));
     SignalHook::attach(m_direct, SIGNAL(historySyncReceived(int,int,int)),
                        [this](int progress, int chats, int messages) {
                            statusBar()->showMessage(
@@ -181,6 +184,7 @@ void MainWindow::buildActions() {
         {"Change subject…", SLOT(groupChangeSubject())},
         {"Change description…", SLOT(groupChangeDescription())},
         {0, 0},
+        {"Group info…", SLOT(groupShowInfo())},
         {"Show invite code…", SLOT(groupShowInvite())},
         {"Revoke invite code", SLOT(groupRevokeInvite())},
         {0, 0},
@@ -861,6 +865,48 @@ void MainWindow::groupLeave() {
         return;
     if (m_directMode) m_direct->leaveGroup(jid);
     else m_api->leaveGroup(jid);
+}
+
+void MainWindow::groupShowInfo() {
+    const QString jid = currentGroupJid();
+    if (jid.isEmpty()) return;
+    statusBar()->showMessage("Loading group info…", 3000);
+    if (m_directMode) m_direct->requestGroupInfo(jid);
+    else m_api->getGroup(jid);
+}
+
+void MainWindow::onGroupReady(const GroupInfo &group) {
+    QStringList lines;
+    lines << "Subject: " + group.subject;
+    if (!group.owner.isEmpty()) lines << "Owner: " + group.owner;
+    if (!group.description.isEmpty())
+        lines << "Description: " + group.description;
+    lines << QString("Members: %1").arg(group.participants.size());
+    lines << "";
+    for (const GroupParticipant &p : group.participants) {
+        QString line = "• " + p.jid;
+        if (!p.name.isEmpty()) line += " (" + p.name + ")";
+        if (p.admin == QString("superadmin")) line += " — superadmin";
+        else if (p.admin == QString("admin")) line += " — admin";
+        lines << line;
+    }
+
+    QDialog dialog(this);
+    dialog.setWindowTitle("Group info");
+    QVBoxLayout *layout = new QVBoxLayout(&dialog);
+    layout->addWidget(new QLabel(QString("<b>%1</b>").arg(htmlEscaped(group.subject)),
+                                 &dialog));
+    QPlainTextEdit *view = new QPlainTextEdit(&dialog);
+    view->setReadOnly(true);
+    view->setMinimumSize(420, 300);
+    view->setPlainText(lines.join("\n"));
+    layout->addWidget(view);
+    QDialogButtonBox *buttons =
+        new QDialogButtonBox(QDialogButtonBox::Close, Qt::Horizontal, &dialog);
+    layout->addWidget(buttons);
+    connect(buttons, SIGNAL(rejected()), &dialog, SLOT(reject()));
+    connect(buttons, SIGNAL(clicked(QAbstractButton*)), &dialog, SLOT(accept()));
+    dialog.exec();
 }
 
 void MainWindow::groupShowInvite() {

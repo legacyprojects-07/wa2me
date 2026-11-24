@@ -58,13 +58,21 @@ BinaryNode buildKeyRequest(const std::string &id, const std::vector<std::string>
 
 // ── Group metadata (iq xmlns="w:g2") ──────────────────────────────────────
 
+struct GroupMember {
+    std::string jid;
+    bool admin = false;        // participant type="admin"
+    bool superAdmin = false;   // participant type="superadmin"
+};
+
 struct GroupInfo {
     std::string jid;
     std::string subject;
     std::string addressingMode;              // "pn" | "lid" (may be empty)
     std::string description;                 // <description><body>
     std::string descId;                      // <description id> — needed to edit it
+    std::string owner;                       // creator/owner attr when present
     std::vector<std::string> participants;   // member jids (devices fetched separately)
+    std::vector<GroupMember> members;        // same list plus the admin flags
 };
 
 // Request: <iq type=get xmlns="w:g2" to=groupJid><query/></iq>

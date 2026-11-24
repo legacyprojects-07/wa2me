@@ -104,6 +104,9 @@ public slots:
                                  const QString &action);
     void requestGroupInvite(const QString &groupJid);   // fetch the code
     void revokeGroupInvite(const QString &groupJid);    // invalidate the code
+    // Group metadata for display; answers with groupReady() (same model the
+    // REST client emits).
+    void requestGroupInfo(const QString &groupJid);
 
 
 signals:
@@ -135,6 +138,7 @@ signals:
     void groupCreated(const QString &groupJid, const QString &subject);
     void groupJoined(const QString &groupJid);
     void groupInviteCode(const QString &groupJid, const QString &code);
+    void groupReady(const GroupInfo &group);   // metadata for the info dialog
     // Server-side group change (someone renamed the group, changed membership…).
     // `kind` is the notification child (subject/create/add/remove/promote/
     // demote/modify/description/leave) and `detail` its human summary.

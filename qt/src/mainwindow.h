@@ -69,6 +69,7 @@ private slots:
     void groupChangeSubject();
     void groupChangeDescription();
     void groupLeave();
+    void groupShowInfo();
     void groupShowInvite();
     void groupRevokeInvite();
     void onGroupAction(const QString &action, const QString &jid, bool ok,
@@ -78,6 +79,7 @@ private slots:
     void onGroupNotification(const QString &groupJid, const QString &kind,
                              const QString &detail);
     void onGroupInviteCode(const QString &groupJid, const QString &code);
+    void onGroupReady(const GroupInfo &group);
 
     // ApiClient
     void onChatsReady(const QList<Chat> &chats);

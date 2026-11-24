@@ -1317,6 +1317,15 @@ void WhatsAppDirect::updateGroupParticipants(const QString &groupJid,
                    .arg(jids.size()));
 }
 
+void WhatsAppDirect::requestGroupInfo(const QString &groupJid) {
+    if (groupJid.isEmpty()) return;
+    PendingGroupOp op;
+    op.kind = "info";
+    op.jid = groupJid;
+    sendGroupOp(op, wa::messaging::buildGroupMetadataRequest(
+                        wa::messaging::generateMessageId(), groupJid.toStdString()));
+}
+
 void WhatsAppDirect::requestGroupInvite(const QString &groupJid) {
     PendingGroupOp op;
     op.kind = "invite";
@@ -1384,6 +1393,40 @@ void WhatsAppDirect::handleGroupOpResult(const QString &iqId, const wa::BinaryNo
         sendGroupOp(refresh, wa::messaging::buildGroupMetadataRequest(
                                  wa::messaging::generateMessageId(), joined));
         DLOG(this, "joined group " + jid);
+        return;
+    }
+
+    if (op.kind == "info") {
+        wa::messaging::GroupInfo meta;
+        if (isError || !wa::messaging::parseGroupMetadata(node, meta, error)) {
+            if (error.empty()) error = "group metadata failed";
+            emit groupActionResult("info", op.jid, false,
+                                   QString::fromStdString(error));
+            return;
+        }
+        m_groupCache.insert(op.jid, meta);
+        GroupInfo group;
+        group.jid = QString::fromStdString(meta.jid);
+        group.subject = QString::fromStdString(meta.subject);
+        group.description = QString::fromStdString(meta.description);
+        group.owner = QString::fromStdString(meta.owner);
+        const std::string me = m_meJid.toStdString();
+        for (const wa::messaging::GroupMember &member : meta.members) {
+            GroupParticipant participant;
+            participant.jid = QString::fromStdString(member.jid);
+            const std::string user =
+                wa::jidDecode(member.jid).user;
+            participant.phoneNumber = QString::fromStdString(user);
+            if (member.superAdmin) participant.admin = "superadmin";
+            else if (member.admin) participant.admin = "admin";
+            participant.isAdmin = member.admin;
+            participant.isSuperAdmin = member.superAdmin;
+            if (wa::areJidsSameUser(member.jid, me)) participant.name = "you";
+            group.participants.append(participant);
+        }
+        group.size = int(meta.members.size());
+        emit groupReady(group);
+        emit groupActionResult("info", op.jid, true, QString());
         return;
     }
 

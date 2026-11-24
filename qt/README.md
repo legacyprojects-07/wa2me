@@ -186,7 +186,7 @@ presence/chatstate/receipt signals, credential persistence, 5-second reconnect
 - **Group administration**: create, join by invite code/link, leave, add /
   remove / promote / demote participants, subject, description, and invite
   code get/revoke — the same `w:g2` stanzas Baileys sends, in both modes
-  (`Group` menu). Incoming `<notification type="w:gp2">` updates rename the
+  (`Group` menu, plus a "Group info" view with admin roles). Incoming `<notification type="w:gp2">` updates rename the
   chat and drop stale metadata; `<notification type="encrypt">` triggers a
   pre-key top-up.
 - **Media**: attach a file → fresh 32-byte mediaKey → `HKDF("WhatsApp <Type>

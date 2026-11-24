@@ -268,9 +268,17 @@ bool parseGroupMetadata(const BinaryNode &iq, GroupInfo &out, std::string &error
         out.descId = desc->attrOr("id");
         if (const BinaryNode *body = desc->child("body")) out.description = body->text;
     }
+    out.owner = group->attrOr("creator", group->attrOr("owner"));
     for (const BinaryNode *p : group->childrenNamed("participant")) {
         const std::string jid = p->attrOr("jid");
-        if (!jid.empty()) out.participants.push_back(jid);
+        if (jid.empty()) continue;
+        out.participants.push_back(jid);
+        GroupMember member;
+        member.jid = jid;
+        const std::string type = p->attrOr("type");
+        member.admin = type == "admin" || type == "superadmin";
+        member.superAdmin = type == "superadmin";
+        out.members.push_back(member);
     }
     if (out.participants.empty()) {
         error = "group has no participants";
@@ -450,9 +458,17 @@ bool parseGroupCreated(const BinaryNode &iq, GroupInfo &out, std::string &error)
             out.descId = desc->attrOr("id");
             if (const BinaryNode *body = desc->child("body")) out.description = body->text;
         }
+        out.owner = group->attrOr("creator", group->attrOr("owner"));
         for (const BinaryNode *p : group->childrenNamed("participant")) {
             const std::string jid = p->attrOr("jid");
-            if (!jid.empty()) out.participants.push_back(jid);
+            if (jid.empty()) continue;
+            out.participants.push_back(jid);
+            GroupMember member;
+            member.jid = jid;
+            const std::string type = p->attrOr("type");
+            member.admin = type == "admin" || type == "superadmin";
+            member.superAdmin = type == "superadmin";
+            out.members.push_back(member);
         }
         if (out.jid.empty()) {
             error = "group create reply has no id";

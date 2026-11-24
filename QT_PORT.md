@@ -230,7 +230,7 @@ Implemented **and verified byte-for-byte against Baileys 6.7.22** (see
 - ✅ **Group administration**: create, join (code or chat.whatsapp.com link),
   leave, add/remove/promote/demote participants, subject, description, invite
   get/revoke — byte-shape identical to Baileys `groups.js`, exposed in the
-  `Group` menu for both modes. Incoming `w:gp2` notifications keep the chat
+  `Group` menu for both modes, with a metadata view (participants + roles). Incoming `w:gp2` notifications keep the chat
   list and cached metadata current
 - ✅ **Qt 4.7.4**: every Qt API the client uses exists in 4.7.4 — verified by
   compiling all Qt sources against the real 4.7.4 headers
