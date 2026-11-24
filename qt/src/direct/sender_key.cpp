@@ -29,7 +29,7 @@ Bytes concat(const Bytes &a, const Bytes &b) {
 
 // HMAC(chainKey, [seed])
 Bytes derive(const Bytes &chainKey, uint8_t seed) {
-    return crypto::hmacSha256(chainKey, Bytes{seed});
+    return crypto::hmacSha256(chainKey, compat::bytes(seed));
 }
 
 // messageSeed -> (cipherKey, iv), exactly like Baileys' SenderMessageKey:
@@ -60,7 +60,7 @@ Bytes encodeDistribution(const SenderKeyDistribution &dist) {
     if (!dist.chainKey.empty()) w.fieldBytes(3, dist.chainKey);
     if (!dist.signingKey.empty()) w.fieldBytes(4, dist.signingKey);
     Bytes out{kVersion};
-    const Bytes body = w.data();
+    const Bytes body = w.bytes();
     out.insert(out.end(), body.begin(), body.end());
     return out;
 }
@@ -73,7 +73,7 @@ bool decodeDistribution(const Bytes &data, SenderKeyDistribution &out, std::stri
     }
     size_t offset = 0;
     if (data[0] == kVersion) offset = 1;   // tolerate a missing version byte
-    proto::Reader r(data.data() + offset, data.size() - offset);
+    proto::Reader r(wa::compat::dataOf(data) + offset, data.size() - offset);
     proto::Field f;
     while (r.next(f)) {
         if (f.number == 1) out.id = uint32_t(f.varint);
@@ -103,7 +103,7 @@ Bytes encodeSenderKeyMessage(const SenderKeyMessage &msg, const Bytes &signingPr
     if (!msg.ciphertext.empty()) w.fieldBytes(3, msg.ciphertext);
 
     Bytes signedPart{kVersion};
-    const Bytes body = w.data();
+    const Bytes body = w.bytes();
     signedPart.insert(signedPart.end(), body.begin(), body.end());
 
     const Bytes signature = crypto::xeddsaSign(signingPrivateKey, signedPart);
@@ -125,7 +125,7 @@ bool decodeSenderKeyMessage(const Bytes &data, SenderKeyMessage &out, std::strin
         return false;
     }
     const size_t bodyLen = data.size() - 64;
-    proto::Reader r(data.data() + 1, bodyLen - 1);
+    proto::Reader r(wa::compat::dataOf(data) + 1, bodyLen - 1);
     proto::Field f;
     while (r.next(f)) {
         if (f.number == 1) out.id = uint32_t(f.varint);
@@ -247,7 +247,7 @@ bool processDistribution(SenderKeyStore &store, const std::string &groupJid,
     fresh.signingKey.priv.clear();
     fresh.signingKey.pub = dist.signingKey.size() == 33
                                ? dist.signingKey
-                               : concat(Bytes{0x05}, dist.signingKey);
+                               : concat(compat::bytes(0x05), dist.signingKey);
     fresh.skipped.clear();
     store.storeSenderKey(name, fresh);
     return true;

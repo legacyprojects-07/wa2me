@@ -240,6 +240,11 @@ Implemented **and verified byte-for-byte against Baileys 6.7.22** (see
 - ✅ **GCC 4.6.3** (the Symbian GCGE): the sources avoid member initialisers,
   `override`, `std::to_string`/`stoi` and `<chrono>`; `src/direct/compat.h`
   fills the gaps and `qt/tests/gcc46_check.sh` enforces it
+- ✅ **STLport 5.2** (the Symbian STL): no `std::function` (`wa::function` in
+  `src/direct/callable.h`), no smart pointers (refcounted `NodePtr`, raw
+  pointers in `WhatsAppDirect`), no `initializer_list` (`compat::bytes`,
+  `jsonObj`), no `<random>`/`<cstdint>`, no `std::move` (`compat::move`), no
+  `vector::data()` (`compat::dataOf`, `Reader/Writer::bytes()`)
 
 Still missing:
 
@@ -347,7 +352,8 @@ Node's `crypto` (set `BAILEYS_DIR` to run the interop phases as well):
 | `test_sender_key` | Baileys' `GroupCipher` decrypts our `skmsg` (HKDF `WhisperGroup`, XEdDSA); we decrypt theirs including its skipped iterations (0, 2, 4…), reject replays/tampering/wrong key id, and re-key cleanly |
 | `test_media` | Baileys' `encryptedStream()` ciphertext/hashes for the same file+mediaKey are identical, the CDN path (`base64url(SHA-256(cipher‖MAC))`) and upload URL match, tampered blobs are rejected, and both directions decrypt; ImageMessage/DocumentMessage decode against protobufjs; stickers use the Image key mapping, `/mms/image` and a round-tripping `StickerMessage`; `oggOpusDuration` reads the Ogg granule position |
 | `qt4_check.sh` | every Qt source compiles against the real Qt 4.7.4 headers (`QT_VERSION 0x040704`) — no Qt 4.8+/5/6 API can creep back in |
-| `gcc46_check.sh` | no C++ construct the Symbian GCGE (GCC 4.6.3) rejects; the Qt-free core also compiles as `-std=c++0x` |
+| `gcc46_check.sh` | no C++ construct the Symbian GCGE (GCC 4.6.3) rejects **and** nothing STLport 5.2 lacks (`std::function`, smart pointers, `initializer_list`, `<random>`, `<cstdint>`, `std::move`, `vector::data()`, `emplace_back`); the Qt-free core also compiles as `-std=c++0x` |
+| `moc_check.sh` | no `struct`/`enum`/data member inside a `signals:`/`slots:` block (moc 4.7 aborts on those); runs the real `moc` when present |
 
 Eleven suites run with a plain host `g++`; three of them are three-phase
 (C++ → Node/libsignal-or-Baileys → C++). The Qt 4 check is separate because it

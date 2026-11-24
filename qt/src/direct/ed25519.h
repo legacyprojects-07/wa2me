@@ -18,7 +18,7 @@
 #pragma once
 
 #include <cstddef>
-#include <cstdint>
+#include <stdint.h>
 #include <vector>
 
 namespace wa {

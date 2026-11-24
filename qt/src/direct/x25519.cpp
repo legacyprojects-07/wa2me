@@ -1,4 +1,5 @@
 #include "x25519.h"
+#include "compat.h"
 #include "sha256.h"   // randomBytes
 
 #include <cstring>
@@ -167,7 +168,7 @@ CurveKeyPair generateCurveKeyPair() {
     CurveKeyPair kp;
     kp.priv = randomBytes(32);
     kp.pub.resize(32);
-    x25519Base(kp.priv.data(), kp.pub.data());
+    x25519Base(wa::compat::dataOf(kp.priv), wa::compat::dataOf(kp.pub));
     return kp;
 }
 

@@ -30,7 +30,6 @@
 #include <QHash>
 #include <QSet>
 
-#include <memory>
 #include <vector>
 
 #include "binary_node.h"
@@ -151,6 +150,14 @@ signals:
     void mediaProgress(const QString &msgId, const QString &stage);
     void logLine(const QString &line);
 
+private slots:
+    void onConnected();
+    void onDisconnected();
+    void onBinaryMessage(const QByteArray &data);
+    void onSocketError(const QString &reason);
+    void sendKeepAlive();
+
+private:
     // Queued sends/uploads (declared before the methods that take them).
     struct PendingSend {
         QString jid;
@@ -161,7 +168,8 @@ signals:
         // completes) instead of `text`.
         bool isMedia;
         wa::waproto::Message payload;
-    PendingSend() : isGroup(false), isMedia(false) {}
+
+        PendingSend() : isGroup(false), isMedia(false) {}
     };
     // An upload in flight: the send waits until the CDN hands back a URL.
     struct PendingUpload {
@@ -169,7 +177,8 @@ signals:
         wa::media::Type type;
         wa::media::UploadedMedia uploaded;
         wa::media::MediaMeta meta;
-    PendingUpload() : type(wa::media::Type::Document) {}
+
+        PendingUpload() : type(wa::media::Type::Document) {}
     };
     // A group administration IQ waiting for its reply.
     struct PendingGroupOp {
@@ -178,14 +187,7 @@ signals:
         QString detail;   // subject/description text, participant count
     };
 
-private slots:
-    void onConnected();
-    void onDisconnected();
-    void onBinaryMessage(const QByteArray &data);
-    void onSocketError(const QString &reason);
-    void sendKeepAlive();
 
-private:
     // Handshake
     void sendClientHello();
     bool handleServerHello(const QByteArray &frame);
@@ -247,9 +249,9 @@ private:
     CachedBundles() : fetchedAt(0) {}
     };
 
-    std::unique_ptr<CredsStore> m_store;
-    std::unique_ptr<SenderKeysStore> m_senderKeys;
-    QNetworkAccessManager *m_net = nullptr;
+    CredsStore *m_store;
+    SenderKeysStore *m_senderKeys;
+    QNetworkAccessManager *m_net;
     QHash<QString, PendingSend> m_pendingSends;   // iq id -> queued message
     QHash<QString, CachedBundles> m_bundleCache;  // user jid -> device bundles
     wa::media::MediaConn m_mediaConn;             // cached <media_conn>
@@ -273,7 +275,7 @@ private:
     bool m_preKeysUploaded;
 
     QtWsSocket m_socket;   // RFC 6455 over QSslSocket (QWebSocket is Qt 5.3+)
-    std::unique_ptr<wa::noise::NoiseHandler> m_noise;
+    wa::noise::NoiseHandler *m_noise;
     QTimer m_keepAlive;
     QTimer m_reconnectTimer;
 

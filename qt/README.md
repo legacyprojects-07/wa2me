@@ -51,11 +51,16 @@ qmake qt/openknot.pro && make                         # desktop Qt 4.7
 ./qt/tests/qt4_check.sh
 ```
 
-The protocol code sticks to the C++11 subset **GCC 4.6** (the Symbian GCGE)
-understands — no member initialisers in declarations, no `override`, no
-`std::to_string`/`stoi`, no `<chrono>`; `src/direct/compat.h` fills those gaps.
-`./qt/tests/gcc46_check.sh` enforces it. CMake defaults to C++17 on desktop and
-honours `-DCMAKE_CXX_STANDARD=11` for device builds.
+The protocol code sticks to what the Symbian toolchain has: the C++11 subset
+**GCC 4.6** (the GCGE) understands — no member initialisers in declarations, no
+`override`, no `std::to_string`/`stoi`, no `<chrono>` — and the **STLport 5.2**
+standard library — no `std::function`, no smart pointers, no
+`initializer_list`, no `<random>`/`<cstdint>`, no `std::move`, no
+`vector::data()`. `src/direct/compat.h` (`bytes`, `dataOf`, `move`, …),
+`src/direct/callable.h` (`wa::function`) and `jsonObj()` fill those gaps;
+`./qt/tests/gcc46_check.sh` enforces the whole subset, `./qt/tests/moc_check.sh`
+enforces what moc 4.7 can parse. CMake defaults to C++17 on desktop and honours
+`-DCMAKE_CXX_STANDARD=11` for device builds.
 Direct mode needs TLS from the platform (Qt 4.7's `QSslSocket`); if the phone's
 root store is too old for WhatsApp's certificate chain you can opt in to
 ignoring certificate errors with `OPENKNOT_INSECURE_TLS=1`.
@@ -122,7 +127,8 @@ tests/
   test_media.cpp        upload/download crypto+URLs vs Baileys encryptedStream()
   test_qt4compat.cpp    Qt 4-only: JSON shim round-trips (creds.json)
   qt4_check.sh          compiles every Qt source against real Qt 4.7.4 headers
-  gcc46_check.sh        rejects anything the Symbian GCC 4.6.3 cannot compile
+  gcc46_check.sh        rejects anything the Symbian GCC 4.6.3 / STLport 5 cannot compile
+  moc_check.sh          rejects declarations moc 4.7 cannot parse in signals:/slots:
   verify_signal.mjs     phase 2 of test_signal (decrypts/encrypts via libsignal)
   verify_message.mjs    phase 2 of test_message (decodes the stanza, replies)
   verify_group.mjs      phase 2 of test_sender_key (GroupCipher decrypt/reply)

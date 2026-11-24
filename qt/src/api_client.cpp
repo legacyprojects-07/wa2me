@@ -128,7 +128,7 @@ QNetworkReply *ApiClient::postMultipart(const QString &path,
 }
 
 void ApiClient::handleJson(QNetworkReply *reply,
-                           std::function<void(const QJsonDocument &)> ok) {
+                           wa::function<void(const QJsonDocument &)> ok) {
     SignalHook::onFinished(reply, [this, reply, ok]() {
         const QByteArray body = reply->readAll();
         const int status = reply->attribute(QNetworkRequest::HttpStatusCodeAttribute).toInt();
@@ -334,11 +334,11 @@ void ApiClient::markChatRead(const QString &jid) {
            [this](const QJsonDocument &d){ emit chatActionDone("read", d.object()); });
 }
 void ApiClient::markChatUnread(const QString &jid, int count) {
-    handleJson(postJson("/chats/" + enc(normalizeJid(jid)) + "/unread", {{"count", count}}),
+    handleJson(postJson("/chats/" + enc(normalizeJid(jid)) + "/unread", jsonObj("count", count)),
            [this](const QJsonDocument &d){ emit chatActionDone("unread", d.object()); });
 }
 void ApiClient::setChatTyping(const QString &jid, const QString &status) {
-    handleJson(postJson("/chats/" + enc(normalizeJid(jid)) + "/typing", {{"status", status}}),
+    handleJson(postJson("/chats/" + enc(normalizeJid(jid)) + "/typing", jsonObj("status", status)),
            [this](const QJsonDocument &d){ emit chatActionDone("typing", d.object()); });
 }
 void ApiClient::subscribePresence(const QString &jid) {
@@ -346,24 +346,24 @@ void ApiClient::subscribePresence(const QString &jid) {
            [this](const QJsonDocument &d){ emit chatActionDone("subscribe", d.object()); });
 }
 void ApiClient::setChatArchived(const QString &jid, bool archived) {
-    handleJson(postJson("/chats/" + enc(normalizeJid(jid)) + "/archive", {{"archived", archived}}),
+    handleJson(postJson("/chats/" + enc(normalizeJid(jid)) + "/archive", jsonObj("archived", archived)),
            [this](const QJsonDocument &d){ emit chatActionDone("archive", d.object()); });
 }
 void ApiClient::setChatPinned(const QString &jid, bool pinned) {
-    handleJson(postJson("/chats/" + enc(normalizeJid(jid)) + "/pin", {{"pinned", pinned}}),
+    handleJson(postJson("/chats/" + enc(normalizeJid(jid)) + "/pin", jsonObj("pinned", pinned)),
            [this](const QJsonDocument &d){ emit chatActionDone("pin", d.object()); });
 }
 void ApiClient::setChatMuted(const QString &jid, bool muted, int durationSeconds) {
     handleJson(postJson("/chats/" + enc(normalizeJid(jid)) + "/mute",
-                    {{"muted", muted}, {"durationSeconds", durationSeconds}}),
+                    jsonObj("muted", muted, "durationSeconds", durationSeconds)),
            [this](const QJsonDocument &d){ emit chatActionDone("mute", d.object()); });
 }
 void ApiClient::clearChat(const QString &jid, bool remote) {
-    handleJson(postJson("/chats/" + enc(normalizeJid(jid)) + "/clear", {{"remote", remote}}),
+    handleJson(postJson("/chats/" + enc(normalizeJid(jid)) + "/clear", jsonObj("remote", remote)),
            [this](const QJsonDocument &d){ emit chatActionDone("clear", d.object()); });
 }
 void ApiClient::deleteChat(const QString &jid, bool remote) {
-    handleJson(postJson("/chats/" + enc(normalizeJid(jid)) + "/delete", {{"remote", remote}}),
+    handleJson(postJson("/chats/" + enc(normalizeJid(jid)) + "/delete", jsonObj("remote", remote)),
            [this](const QJsonDocument &d){ emit chatActionDone("delete", d.object()); });
 }
 
@@ -407,22 +407,22 @@ void ApiClient::getMedia(const QString &jid, const QString &msgId, bool thumb, b
 }
 void ApiClient::deleteMessage(const QString &jid, const QString &msgId, const QString &scope) {
     handleJson(postJson("/messages/" + enc(normalizeJid(jid)) + "/" + enc(msgId) + "/delete",
-                    {{"scope", scope}}),
+                    jsonObj("scope", scope)),
            [this](const QJsonDocument &d){ emit messageActionDone("delete", d.object()); });
 }
 void ApiClient::forwardMessage(const QString &fromJid, const QString &msgId, const QString &toJid) {
     handleJson(postJson("/messages/" + enc(normalizeJid(fromJid)) + "/" + enc(msgId) + "/forward",
-                    {{"to", normalizeJid(toJid)}}),
+                    jsonObj("to", normalizeJid(toJid))),
            [this](const QJsonDocument &d){ emit messageActionDone("forward", d.object()); });
 }
 void ApiClient::reactMessage(const QString &jid, const QString &msgId, const QString &emoji) {
     handleJson(postJson("/messages/" + enc(normalizeJid(jid)) + "/" + enc(msgId) + "/react",
-                    {{"emoji", emoji}}),
+                    jsonObj("emoji", emoji)),
            [this](const QJsonDocument &d){ emit messageActionDone("react", d.object()); });
 }
 void ApiClient::editMessage(const QString &jid, const QString &msgId, const QString &text) {
     handleJson(postJson("/messages/" + enc(normalizeJid(jid)) + "/" + enc(msgId) + "/edit",
-                    {{"text", text}}),
+                    jsonObj("text", text)),
            [this](const QJsonDocument &d){ emit messageActionDone("edit", d.object()); });
 }
 
@@ -458,7 +458,7 @@ void ApiClient::sync(qint64 sinceMs, int limit) {
 // ─── Send ────────────────────────────────────────────────────────────────────
 
 void ApiClient::sendText(const QString &jid, const QString &text, const QString &quotedId) {
-    QJsonObject body = {{"jid", normalizeJid(jid)}, {"text", text}};
+    QJsonObject body = jsonObj("jid", normalizeJid(jid), "text", text);
     if (!quotedId.isEmpty()) body["quotedId"] = quotedId;
     handleJson(postJson("/send", body), [this](const QJsonDocument &d){ emit sendDone(d.object()); });
 }
@@ -495,15 +495,14 @@ void ApiClient::sendMedia(const QString &jid, const QString &filePath,
 }
 void ApiClient::sendContact(const QString &jid, const QString &name, const QString &phone,
                             const QString &quotedId) {
-    QJsonObject body = {{"jid", normalizeJid(jid)}, {"name", name}, {"phone", phone}};
+    QJsonObject body = jsonObj("jid", normalizeJid(jid), "name", name, "phone", phone);
     if (!quotedId.isEmpty()) body["quotedId"] = quotedId;
     handleJson(postJson("/send-contact", body), [this](const QJsonDocument &d){ emit sendDone(d.object()); });
 }
 void ApiClient::sendLocation(const QString &jid, double lat, double lng,
                              const QString &name, const QString &address,
                              const QString &quotedId) {
-    QJsonObject body = {{"jid", normalizeJid(jid)},
-                        {"latitude", lat}, {"longitude", lng}};
+    QJsonObject body = jsonObj("jid", normalizeJid(jid), "latitude", lat, "longitude", lng);
     if (!name.isEmpty()) body["name"] = name;
     if (!address.isEmpty()) body["address"] = address;
     if (!quotedId.isEmpty()) body["quotedId"] = quotedId;
@@ -516,15 +515,15 @@ void ApiClient::getMe() {
     handleJson(get("/me"), [this](const QJsonDocument &d){ emit meReady(d.object()); });
 }
 void ApiClient::updateMyStatus(const QString &status) {
-    handleJson(postJson("/me/status", {{"status", status}}),
+    handleJson(postJson("/me/status", jsonObj("status", status)),
            [this](const QJsonDocument &d){ emit profileActionDone("status", d.object()); });
 }
 void ApiClient::updateMyName(const QString &name) {
-    handleJson(postJson("/me/name", {{"name", name}}),
+    handleJson(postJson("/me/name", jsonObj("name", name)),
            [this](const QJsonDocument &d){ emit profileActionDone("name", d.object()); });
 }
 void ApiClient::setMyPresence(const QString &status) {
-    handleJson(postJson("/me/presence", {{"status", status}}),
+    handleJson(postJson("/me/presence", jsonObj("status", status)),
            [this](const QJsonDocument &d){ emit profileActionDone("presence", d.object()); });
 }
 void ApiClient::getUser(const QString &jid) {
@@ -537,7 +536,7 @@ void ApiClient::checkOnWhatsApp(const QString &phone) {
 void ApiClient::checkOnWhatsAppBatch(const QStringList &phones) {
     QJsonArray arr;
     for (const QString &p : phones) arr.append(p);
-    handleJson(postJson("/check", {{"phones", arr}}),
+    handleJson(postJson("/check", jsonObj("phones", arr)),
            [this](const QJsonDocument &d){ emit checkBatchReady(d.array()); });
 }
 void ApiClient::getContacts(const QString &q) {
@@ -593,11 +592,11 @@ void ApiClient::getGroups(int limit, int offset) {
 void ApiClient::createGroup(const QString &subject, const QStringList &participants) {
     QJsonArray arr;
     for (const QString &p : participants) arr.append(normalizeJid(p));
-    handleJson(postJson("/groups", {{"subject", subject}, {"participants", arr}}),
+    handleJson(postJson("/groups", jsonObj("subject", subject, "participants", arr)),
            [this](const QJsonDocument &d){ emit groupActionDone("create", d.object()); });
 }
 void ApiClient::joinGroup(const QString &codeOrLink) {
-    handleJson(postJson("/groups/join", {{"code", codeOrLink}}),
+    handleJson(postJson("/groups/join", jsonObj("code", codeOrLink)),
            [this](const QJsonDocument &d){ emit groupActionDone("join", d.object()); });
 }
 void ApiClient::getGroup(const QString &jid) {
@@ -609,7 +608,7 @@ void ApiClient::updateGroupParticipants(const QString &jid, const QStringList &p
     QJsonArray arr;
     for (const QString &p : participants) arr.append(normalizeJid(p));
     handleJson(postJson("/groups/" + enc(normalizeJid(jid)) + "/participants",
-                    {{"action", action}, {"participants", arr}}),
+                    jsonObj("action", action, "participants", arr)),
            [this](const QJsonDocument &d){ emit groupActionDone("participants", d.object()); });
 }
 void ApiClient::leaveGroup(const QString &jid) {
@@ -625,14 +624,14 @@ void ApiClient::revokeGroupInvite(const QString &jid) {
            [this](const QJsonDocument &d){ emit groupActionDone("revoke-invite", d.object()); });
 }
 void ApiClient::updateGroupSubject(const QString &jid, const QString &subject) {
-    handleJson(postJson("/groups/" + enc(normalizeJid(jid)) + "/subject", {{"subject", subject}}),
+    handleJson(postJson("/groups/" + enc(normalizeJid(jid)) + "/subject", jsonObj("subject", subject)),
            [this](const QJsonDocument &d){ emit groupActionDone("subject", d.object()); });
 }
 void ApiClient::updateGroupDescription(const QString &jid, const QString &description) {
-    handleJson(postJson("/groups/" + enc(normalizeJid(jid)) + "/description", {{"description", description}}),
+    handleJson(postJson("/groups/" + enc(normalizeJid(jid)) + "/description", jsonObj("description", description)),
            [this](const QJsonDocument &d){ emit groupActionDone("description", d.object()); });
 }
 void ApiClient::setGroupSetting(const QString &jid, const QString &setting) {
-    handleJson(postJson("/groups/" + enc(normalizeJid(jid)) + "/settings", {{"setting", setting}}),
+    handleJson(postJson("/groups/" + enc(normalizeJid(jid)) + "/settings", jsonObj("setting", setting)),
            [this](const QJsonDocument &d){ emit groupActionDone("settings", d.object()); });
 }

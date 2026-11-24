@@ -13,7 +13,7 @@
 
 #pragma once
 
-#include <cstdint>
+#include <stdint.h>
 #include <string>
 #include <vector>
 
@@ -37,7 +37,7 @@ public:
     // Writes a packed repeated varint field.
     void fieldPackedVarints(uint32_t field, const std::vector<uint32_t> &values);
 
-    const Bytes &data() const { return buf_; }
+    const Bytes &bytes() const { return buf_; }
 
 private:
     Bytes buf_;
@@ -66,7 +66,7 @@ public:
     Bytes slice(const Field &f) const {
         return Bytes(data_.begin() + f.start, data_.begin() + f.end);
     }
-    const Bytes &data() const { return data_; }
+    const Bytes &bytes() const { return data_; }
 
 private:
     bool readVarint(uint64_t &v);

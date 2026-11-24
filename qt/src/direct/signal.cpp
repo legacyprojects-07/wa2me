@@ -19,13 +19,22 @@ constexpr int kVersion = 3;
 
 // ── Small helpers ─────────────────────────────────────────────────────────
 
-Bytes concat(std::initializer_list<Bytes> parts) {
+// std::initializer_list is not available in STLport 5, so the 2..4 operand
+// forms are spelled out.
+Bytes concat(const Bytes &a, const Bytes &b) {
     Bytes out;
-    size_t total = 0;
-    for (const auto &p : parts) total += p.size();
-    out.reserve(total);
-    for (const auto &p : parts) out.insert(out.end(), p.begin(), p.end());
+    out.reserve(a.size() + b.size());
+    out.insert(out.end(), a.begin(), a.end());
+    out.insert(out.end(), b.begin(), b.end());
     return out;
+}
+
+Bytes concat(const Bytes &a, const Bytes &b, const Bytes &c) {
+    return concat(concat(a, b), c);
+}
+
+Bytes concat(const Bytes &a, const Bytes &b, const Bytes &c, const Bytes &d) {
+    return concat(concat(concat(a, b), c), d);
 }
 
 // libsignal's deriveSecrets: HKDF-SHA256(input, salt, info) -> 3 x 32 bytes
@@ -47,7 +56,7 @@ bool agreement(const Bytes &pub, const Bytes &priv, Bytes &out) {
     const Bytes raw = rawPublicKey(pub);
     if (raw.size() != 32 || priv.size() != 32) return false;
     out.resize(32);
-    return crypto::x25519(priv.data(), raw.data(), out.data());
+    return crypto::x25519(wa::compat::dataOf(priv), wa::compat::dataOf(raw), wa::compat::dataOf(out));
 }
 
 // ── WhisperTextProtocol messages ──────────────────────────────────────────
@@ -65,7 +74,7 @@ Bytes encodeWhisperMessage(const WhisperMessage &m) {
     w.fieldVarint(2, m.counter);
     w.fieldVarint(3, m.previousCounter);
     if (!m.ciphertext.empty()) w.fieldBytes(4, m.ciphertext);
-    return w.data();
+    return w.bytes();
 }
 
 bool decodeWhisperMessage(const Bytes &data, WhisperMessage &out) {
@@ -101,7 +110,7 @@ Bytes encodePreKeyWhisperMessage(const PreKeyWhisperMessage &m) {
     if (!m.message.empty()) w.fieldBytes(4, m.message);
     w.fieldVarint(5, m.registrationId);
     w.fieldVarint(6, m.signedPreKeyId);
-    return w.data();
+    return w.bytes();
 }
 
 bool decodePreKeyWhisperMessage(const Bytes &data, PreKeyWhisperMessage &out) {
@@ -132,8 +141,8 @@ void fillMessageKeys(Chain &chain, int32_t counter) {
         throw std::runtime_error("Chain closed");
 
     while (chain.counter < counter) {
-        chain.messageKeys[uint32_t(chain.counter + 1)] = mac(chain.chainKey, Bytes{0x01});
-        chain.chainKey = mac(chain.chainKey, Bytes{0x02});
+        chain.messageKeys[uint32_t(chain.counter + 1)] = mac(chain.chainKey, compat::bytes(0x01));
+        chain.chainKey = mac(chain.chainKey, compat::bytes(0x02));
         chain.counter += 1;
     }
 }
@@ -199,22 +208,22 @@ Session initSession(bool initiator, const KeyPair &ourEphemeral, const KeyPair *
 
     // Layout: 0xFF*32 || DH1 || DH2 || DH3 [|| DH4]
     if (initiator) {
-        std::memcpy(sharedSecret.data() + 32, a1.data(), 32);
-        std::memcpy(sharedSecret.data() + 64, a2.data(), 32);
+        std::memcpy(wa::compat::dataOf(sharedSecret) + 32, wa::compat::dataOf(a1), 32);
+        std::memcpy(wa::compat::dataOf(sharedSecret) + 64, wa::compat::dataOf(a2), 32);
     } else {
-        std::memcpy(sharedSecret.data() + 32, a2.data(), 32);
-        std::memcpy(sharedSecret.data() + 64, a1.data(), 32);
+        std::memcpy(wa::compat::dataOf(sharedSecret) + 32, wa::compat::dataOf(a2), 32);
+        std::memcpy(wa::compat::dataOf(sharedSecret) + 64, wa::compat::dataOf(a1), 32);
     }
-    std::memcpy(sharedSecret.data() + 96, a3.data(), 32);
+    std::memcpy(wa::compat::dataOf(sharedSecret) + 96, wa::compat::dataOf(a3), 32);
 
     if (ourEphemeral.valid() && theirEphemeral) {
         Bytes a4;
         if (!agreement(*theirEphemeral, ourEphemeral.priv, a4)) throw std::runtime_error("x3dh a4");
-        std::memcpy(sharedSecret.data() + 128, a4.data(), 32);
+        std::memcpy(wa::compat::dataOf(sharedSecret) + 128, wa::compat::dataOf(a4), 32);
     }
 
     Bytes masterKey = crypto::hkdfSha256(sharedSecret, 64, Bytes(32, 0),
-                                         Bytes{'W','h','i','s','p','e','r','T','e','x','t'});
+                                         compat::bytesFromText("WhisperText"));
 
     Session session;
     session.registrationId = registrationId;
@@ -259,7 +268,7 @@ KeyPair keyPairFromPrivate(const Bytes &priv) {
     kp.priv = priv;
     kp.pub.resize(33);
     kp.pub[0] = kKeyBundleType;
-    if (!crypto::x25519Base(priv.data(), kp.pub.data() + 1)) return KeyPair();
+    if (!crypto::x25519Base(wa::compat::dataOf(priv), wa::compat::dataOf(kp.pub) + 1)) return KeyPair();
     return kp;
 }
 
@@ -279,10 +288,10 @@ Chain *Session::chain(const Bytes &ephemeralKey) {
 
 Chain *Session::addChain(Chain c) {
     if (Chain *existing = chain(c.ephemeralKey)) {
-        *existing = std::move(c);
+        *existing = compat::move(c);
         return existing;
     }
-    chains.push_back(std::move(c));
+    chains.push_back(compat::move(c));
     return &chains.back();
 }
 
@@ -312,11 +321,11 @@ Session *Record::sessionForBaseKey(const Bytes &baseKey) {
 void Record::setSession(Session s) {
     for (auto &existing : sessions) {
         if (existing.baseKey == s.baseKey) {
-            existing = std::move(s);
+            existing = compat::move(s);
             return;
         }
     }
-    sessions.push_back(std::move(s));
+    sessions.push_back(compat::move(s));
 }
 
 // ── Public API ────────────────────────────────────────────────────────────
@@ -357,7 +366,7 @@ bool initOutgoingSession(Store &store, const std::string &address,
 
         Record record = store.loadSession(address);
         for (auto &existing : record.sessions) existing.closed = true;
-        record.setSession(std::move(session));
+        record.setSession(compat::move(session));
         store.storeSession(address, record);
         return true;
     } catch (const std::exception &e) {
@@ -408,8 +417,8 @@ EncryptResult encrypt(Store &store, const std::string &address, const Bytes &pla
         const Bytes msgBuf = encodeWhisperMessage(msg);
 
         const KeyPair ourIdentity = store.ourIdentity();
-        Bytes macInput = concat({ourIdentity.pub, session->remoteIdentityKey,
-                                 Bytes{tupleByte(kVersion, kVersion)}, msgBuf});
+        Bytes macInput = concat(ourIdentity.pub, session->remoteIdentityKey,
+                                compat::bytes(tupleByte(kVersion, kVersion)), msgBuf);
         const Bytes full = mac(macKey, macInput);
 
         Bytes framed;
@@ -500,8 +509,8 @@ bool decryptWhisper(Session &session, const Bytes &buffer, const Bytes &ourIdent
     Bytes cipherKey, macKey, iv;
     deriveSecrets(messageKey, Bytes(32, 0), "WhisperMessageKeys", cipherKey, macKey, iv);
 
-    Bytes macInput = concat({session.remoteIdentityKey, ourIdentityPub,
-                             Bytes{tupleByte(kVersion, kVersion)}, messageProto});
+    Bytes macInput = concat(session.remoteIdentityKey, ourIdentityPub,
+                            compat::bytes(tupleByte(kVersion, kVersion)), messageProto);
     const Bytes full = mac(macKey, macInput);
     if (!crypto::constantTimeEquals(Bytes(full.begin(), full.begin() + 8), theirMac)) {
         error = "bad MAC";
@@ -593,7 +602,7 @@ bool decrypt(Store &store, const std::string &address, int type, const Bytes &bo
 
         Session session = initSession(false, preKeyPair, &signedPreKeyPair, pre.identityKey,
                                       &pre.baseKey, nullptr, pre.registrationId, ourIdentity);
-        record.setSession(std::move(session));
+        record.setSession(compat::move(session));
 
         Session *created = record.sessionForBaseKey(pre.baseKey);
         if (!created || !decryptWhisper(*created, pre.message, ourIdentity.pub, plaintext, error))
@@ -735,9 +744,9 @@ bool deserializeRecord(const Bytes &data, Record &out) {
                 const uint32_t id = cur.u32();
                 chain.messageKeys[id] = cur.blob();
             }
-            s.chains.push_back(std::move(chain));
+            s.chains.push_back(compat::move(chain));
         }
-        out.sessions.push_back(std::move(s));
+        out.sessions.push_back(compat::move(s));
     }
     return cur.ok;
 }

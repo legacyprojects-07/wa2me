@@ -3,8 +3,6 @@
 #include "compat.h"
 
 #include <cstring>
-#include <random>
-#include <chrono>
 #include <stdexcept>
 
 namespace wa {
@@ -116,10 +114,10 @@ Bytes sha256(const uint8_t *data, size_t len) {
     return s.final();
 }
 
-Bytes sha256(const Bytes &data) { return sha256(data.data(), data.size()); }
+Bytes sha256(const Bytes &data) { return sha256(wa::compat::dataOf(data), data.size()); }
 
 Bytes sha256(const std::string &data) {
-    return sha256(reinterpret_cast<const uint8_t *>(data.data()), data.size());
+    return sha256(reinterpret_cast<const uint8_t *>(wa::compat::dataOf(data)), data.size());
 }
 
 // ── SHA-1 (RFC 3174) ──────────────────────────────────────────────────────
@@ -221,22 +219,25 @@ bool constantTimeEquals(const Bytes &a, const Bytes &b) {
 }
 
 Bytes randomBytes(size_t n) {
-    // Seed material: std::random_device plus clock/address entropy, mixed
-    // through SHA-256 and used in counter mode. This is adequate for key
-    // *material* on a device with no OS RNG hook, but on production hardware
-    // prefer /dev/urandom (Linux/Symbian) — see randomBytesStrong() note in
-    // QT_PORT.md §5.
+    // Seed material: /dev/urandom where the platform has one, plus
+    // clock/address/counter entropy, mixed through SHA-256 and used in counter
+    // mode. std::random_device is C++11 and missing from Symbian's STLport 5,
+    // so the file is read directly (the desktop and the interop tests get real
+    // OS randomness from it; Symbian falls back to the timing entropy).
     Bytes seed;
-    try {
-        std::random_device rd;
-        for (int i = 0; i < 8; i++) {
-            const uint32_t v = rd();
-            seed.insert(seed.end(), reinterpret_cast<const uint8_t *>(&v),
-                        reinterpret_cast<const uint8_t *>(&v) + 4);
-        }
-    } catch (...) {
-        // random_device may throw on some toolchains; fall through to timing.
+    FILE *urandom = fopen("/dev/urandom", "rb");
+    if (urandom) {
+        uint8_t buf[32];
+        const size_t got = fread(buf, 1, sizeof buf, urandom);
+        seed.insert(seed.end(), buf, buf + got);
+        fclose(urandom);
     }
+    // A process-wide counter: two calls inside the same clock tick must still
+    // produce different seeds.
+    static uint32_t callCounter = 0;
+    callCounter++;
+    seed.insert(seed.end(), reinterpret_cast<const uint8_t *>(&callCounter),
+                reinterpret_cast<const uint8_t *>(&callCounter) + sizeof(callCounter));
     // <chrono> is missing on older toolchains (GCC 4.6 on Symbian); the clock
     // and the address below are mixed into the hash, so the quality is the same.
     const unsigned long long ticks = compat::clockTicks();

@@ -47,6 +47,7 @@ HEADERS += \
     src/qt4compat/qt4compat.h \
     src/qt4compat/websocket.h \
     src/direct/compat.h \
+    src/direct/callable.h \
     src/direct/wa_tokens.h \
     src/direct/binary_node.h \
     src/direct/inflate.h \

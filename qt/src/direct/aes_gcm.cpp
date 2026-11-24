@@ -1,4 +1,5 @@
 #include "aes_gcm.h"
+#include "compat.h"
 
 #include <cstring>
 #include <stdexcept>
@@ -150,7 +151,7 @@ void ghash(uint8_t out[16], const uint8_t h[16],
         for (size_t off = 0; off < data.size(); off += 16) {
             const size_t n = std::min<size_t>(16, data.size() - off);
             uint8_t block[16] = {0};
-            std::memcpy(block, data.data() + off, n);
+            std::memcpy(block, wa::compat::dataOf(data) + off, n);
             for (int i = 0; i < 16; i++) y[i] ^= block[i];
             ghashMul(y, h);
         }
@@ -197,7 +198,7 @@ Bytes ctrCrypt(const Bytes &input, const Aes256 &aes, const uint8_t j0[16]) {
 Aes256::Aes256(const Bytes &key) {
     if (key.size() != 32) throw std::invalid_argument("AES-256 key must be 32 bytes");
 
-    std::memcpy(roundKeys_, key.data(), 32);
+    std::memcpy(roundKeys_, wa::compat::dataOf(key), 32);
 
     uint8_t rcon = 1;
     const int nk = 8;          // 256-bit key
@@ -261,7 +262,7 @@ void Aes256::decryptBlock(const uint8_t in[16], uint8_t out[16]) const {
 
 static void computeJ0(const Bytes &iv, const uint8_t h[16], uint8_t j0[16]) {
     if (iv.size() == 12) {
-        std::memcpy(j0, iv.data(), 12);
+        std::memcpy(j0, wa::compat::dataOf(iv), 12);
         j0[12] = 0; j0[13] = 0; j0[14] = 0; j0[15] = 1;
     } else {
         uint8_t y[16] = {0};
@@ -269,7 +270,7 @@ static void computeJ0(const Bytes &iv, const uint8_t h[16], uint8_t j0[16]) {
         for (size_t off = 0; off < data.size(); off += 16) {
             const size_t n = std::min<size_t>(16, data.size() - off);
             uint8_t block[16] = {0};
-            std::memcpy(block, data.data() + off, n);
+            std::memcpy(block, wa::compat::dataOf(data) + off, n);
             for (int i = 0; i < 16; i++) y[i] ^= block[i];
             ghashMul(y, h);
         }
@@ -348,12 +349,12 @@ Bytes aes256CbcEncrypt(const Bytes &plaintext, const Bytes &key, const Bytes &iv
 
     Bytes out(data.size());
     uint8_t prev[16];
-    std::memcpy(prev, iv.data(), 16);
+    std::memcpy(prev, wa::compat::dataOf(iv), 16);
     for (size_t off = 0; off < data.size(); off += 16) {
         uint8_t block[16];
         for (int i = 0; i < 16; i++) block[i] = uint8_t(data[off + i] ^ prev[i]);
-        aes.encryptBlock(block, out.data() + off);
-        std::memcpy(prev, out.data() + off, 16);
+        aes.encryptBlock(block, wa::compat::dataOf(out) + off);
+        std::memcpy(prev, wa::compat::dataOf(out) + off, 16);
     }
     return out;
 }
@@ -365,12 +366,12 @@ bool aes256CbcDecryptRaw(const Bytes &ciphertext, const Bytes &key,
 
     Bytes out(ciphertext.size());
     uint8_t prev[16];
-    std::memcpy(prev, iv.data(), 16);
+    std::memcpy(prev, wa::compat::dataOf(iv), 16);
     for (size_t off = 0; off < ciphertext.size(); off += 16) {
         uint8_t dec[16];
-        aes.decryptBlock(ciphertext.data() + off, dec);
+        aes.decryptBlock(wa::compat::dataOf(ciphertext) + off, dec);
         for (int i = 0; i < 16; i++) out[off + i] = uint8_t(dec[i] ^ prev[i]);
-        std::memcpy(prev, ciphertext.data() + off, 16);
+        std::memcpy(prev, wa::compat::dataOf(ciphertext) + off, 16);
     }
     plaintext = out;
     return true;
@@ -383,12 +384,12 @@ bool aes256CbcDecrypt(const Bytes &ciphertext, const Bytes &key,
 
     Bytes out(ciphertext.size());
     uint8_t prev[16];
-    std::memcpy(prev, iv.data(), 16);
+    std::memcpy(prev, wa::compat::dataOf(iv), 16);
     for (size_t off = 0; off < ciphertext.size(); off += 16) {
         uint8_t dec[16];
-        aes.decryptBlock(ciphertext.data() + off, dec);
+        aes.decryptBlock(wa::compat::dataOf(ciphertext) + off, dec);
         for (int i = 0; i < 16; i++) out[off + i] = uint8_t(dec[i] ^ prev[i]);
-        std::memcpy(prev, ciphertext.data() + off, 16);
+        std::memcpy(prev, wa::compat::dataOf(ciphertext) + off, 16);
     }
 
     // Strip PKCS#7 padding (validated).
@@ -407,7 +408,7 @@ Bytes aes256Ctr(const Bytes &input, const Bytes &key, const Bytes &iv) {
     const Aes256 aes(key);
     Bytes out(input.size());
     uint8_t counter[16];
-    std::memcpy(counter, iv.data(), 16);
+    std::memcpy(counter, wa::compat::dataOf(iv), 16);
     uint8_t keystream[16];
     for (size_t off = 0; off < input.size(); off += 16) {
         aes.encryptBlock(counter, keystream);

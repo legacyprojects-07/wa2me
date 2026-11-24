@@ -1,4 +1,5 @@
 #include "wa_proto.h"
+#include "compat.h"
 
 #include <cstring>
 
@@ -18,7 +19,7 @@ Bytes encodeContextInfo(const ContextInfo &c) {
     if (!c.quotedMessage.empty()) w.fieldBytes(3, c.quotedMessage);
     if (!c.remoteJid.empty()) w.fieldString(4, c.remoteJid);
     if (c.expiration) w.fieldVarint(6, c.expiration);
-    return w.data();
+    return w.bytes();
 }
 
 void decodeContextInfo(const Bytes &data, ContextInfo &out) {
@@ -105,7 +106,7 @@ Bytes encodeMedia(const MediaInfo &m, int kind) {
 
     if (!m.jpegThumbnail.empty()) w.fieldBytes(16, m.jpegThumbnail);
     if (m.hasContextInfo) w.fieldMessage(17, encodeContextInfo(m.contextInfo));
-    return w.data();
+    return w.bytes();
 }
 
 void decodeMedia(const Bytes &data, int kind, MediaInfo &out) {
@@ -221,7 +222,7 @@ Bytes encodeMessageKey(const MessageKey &k) {
     if (k.fromMe) w.fieldBool(2, true);
     if (!k.id.empty()) w.fieldString(3, k.id);
     if (!k.participant.empty()) w.fieldString(4, k.participant);
-    return w.data();
+    return w.bytes();
 }
 
 } // namespace
@@ -258,7 +259,7 @@ Bytes encodeMessage(const Message &m) {
             skd.fieldString(1, m.senderKeyDistribution.groupId);
         if (!m.senderKeyDistribution.axolotl.empty())
             skd.fieldBytes(2, m.senderKeyDistribution.axolotl);
-        w.fieldMessage(2, skd.data());
+        w.fieldMessage(2, skd.bytes());
     }
     if (!m.image.empty()) w.fieldMessage(3, encodeMedia(m.image, 3));
     if (!m.document.empty()) w.fieldMessage(7, encodeMedia(m.document, 7));
@@ -268,13 +269,13 @@ Bytes encodeMessage(const Message &m) {
         proto::Writer ext;
         ext.fieldString(1, m.extendedText);
         if (m.image.hasContextInfo) ext.fieldMessage(17, encodeContextInfo(m.image.contextInfo));
-        w.fieldMessage(6, ext.data());
+        w.fieldMessage(6, ext.bytes());
     }
     if (m.hasProtocolMessage) {
         proto::Writer p;
         p.fieldMessage(1, encodeMessageKey(m.protocolKey));
         p.fieldVarint(2, m.protocolType);
-        w.fieldMessage(12, p.data());
+        w.fieldMessage(12, p.bytes());
     }
     if (!m.sticker.empty()) w.fieldMessage(26, encodeMedia(m.sticker, 26));
     if (m.hasDeviceSent) {
@@ -282,9 +283,9 @@ Bytes encodeMessage(const Message &m) {
         if (!m.deviceSentDestinationJid.empty())
             ds.fieldString(1, m.deviceSentDestinationJid);
         if (!m.deviceSentPayload.empty()) ds.fieldBytes(2, m.deviceSentPayload);
-        w.fieldMessage(31, ds.data());
+        w.fieldMessage(31, ds.bytes());
     }
-    return w.data();
+    return w.bytes();
 }
 
 bool decodeMessage(const Bytes &data, Message &out) {
@@ -379,7 +380,7 @@ Bytes encodeWebMessageInfo(const WebMessageInfo &info) {
     if (info.status) w.fieldVarint(4, info.status);
     if (!info.participant.empty()) w.fieldString(5, info.participant);
     if (!info.pushName.empty()) w.fieldString(19, info.pushName);
-    return w.data();
+    return w.bytes();
 }
 
 bool decodeWebMessageInfo(const Bytes &data, WebMessageInfo &out) {
@@ -441,7 +442,7 @@ bool decodeHistorySync(const Bytes &data, HistorySync &out) {
                         if (h.number == 1) {
                             WebMessageInfo info;
                             decodeWebMessageInfo(h.bytes, info);
-                            conv.messages.push_back(std::move(info));
+                            conv.messages.push_back(compat::move(info));
                         }
                     }
                     break;
@@ -454,7 +455,7 @@ bool decodeHistorySync(const Bytes &data, HistorySync &out) {
                 default: break;
                 }
             }
-            out.conversations.push_back(std::move(conv));
+            out.conversations.push_back(compat::move(conv));
             break;
         }
         case 5: out.chunkOrder = uint32_t(f.varint); break;
@@ -467,7 +468,7 @@ bool decodeHistorySync(const Bytes &data, HistorySync &out) {
                 if (g.number == 1) pn.id.assign(g.bytes.begin(), g.bytes.end());
                 else if (g.number == 2) pn.pushname.assign(g.bytes.begin(), g.bytes.end());
             }
-            out.pushnames.push_back(std::move(pn));
+            out.pushnames.push_back(compat::move(pn));
             break;
         }
         case 15: {   // PhoneNumberToLIDMapping { pnJid = 1, lidJid = 2 }

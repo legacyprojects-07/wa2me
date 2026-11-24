@@ -1,4 +1,5 @@
 #include "inflate.h"
+#include "compat.h"
 
 #include <cstring>
 
@@ -304,7 +305,7 @@ bool inflateZlib(const uint8_t *data, size_t len, std::vector<uint8_t> &out,
 
 bool inflateZlib(const std::vector<uint8_t> &data, std::vector<uint8_t> &out,
                  size_t maxOutput) {
-    return inflateZlib(data.data(), data.size(), out, maxOutput);
+    return inflateZlib(wa::compat::dataOf(data), data.size(), out, maxOutput);
 }
 
 } // namespace binary

@@ -1,4 +1,5 @@
 #include "noise.h"
+#include "compat.h"
 
 #include "aes_gcm.h"
 #include "x25519.h"
@@ -34,14 +35,14 @@ bool curveSharedKey(const Bytes &priv, const Bytes &pub, Bytes &out) {
     if (pubKey.size() == 33) pubKey.erase(pubKey.begin());   // strip KEY_BUNDLE_TYPE
     if (pubKey.size() != 32) return false;
     out.resize(32);
-    return crypto::x25519(priv.data(), pubKey.data(), out.data());
+    return crypto::x25519(wa::compat::dataOf(priv), wa::compat::dataOf(pubKey), wa::compat::dataOf(out));
 }
 
 } // namespace
 
 NoiseHandler::NoiseHandler(Bytes ephPriv, Bytes ephPub, Bytes routingInfo)
-    : ephPriv_(std::move(ephPriv)), ephPub_(std::move(ephPub)),
-      routingInfo_(std::move(routingInfo)), readCounter_(0), writeCounter_(0),
+    : ephPriv_(compat::move(ephPriv)), ephPub_(compat::move(ephPub)),
+      routingInfo_(compat::move(routingInfo)), readCounter_(0), writeCounter_(0),
       finished_(false), sentIntro_(false) {
     // Baileys: hash = NOISE_MODE.byteLength === 32 ? NOISE_MODE : sha256(NOISE_MODE).
     // "Noise_XX_25519_AESGCM_SHA256" is 28 chars + 4 NULs = exactly 32 bytes,
@@ -187,7 +188,7 @@ Bytes NoiseHandler::encodeFrame(const Bytes &data) {
 }
 
 void NoiseHandler::decodeFrames(const Bytes &newData,
-                                const std::function<void(const Bytes &)> &onFrame) {
+                                const wa::function<void(const Bytes &)> &onFrame) {
     inBytes_.insert(inBytes_.end(), newData.begin(), newData.end());
 
     auto frameSize = [this]() -> size_t {

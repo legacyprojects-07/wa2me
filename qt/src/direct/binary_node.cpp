@@ -90,7 +90,7 @@ void BinaryNode::setAttr(const std::string &key, const std::string &value) {
     for (auto &kv : attrs) {
         if (kv.first == key) { kv.second = value; return; }
     }
-    attrs.emplace_back(key, value);
+    attrs.push_back(std::make_pair(key, value));
 }
 
 void BinaryNode::removeAttr(const std::string &key) {
@@ -100,17 +100,17 @@ void BinaryNode::removeAttr(const std::string &key) {
 }
 
 BinaryNode &BinaryNode::setText(std::string t) {
-    contentType = Content::Text; text = std::move(t); bytes.clear(); children.clear();
+    contentType = Content::Text; text = compat::move(t); bytes.clear(); children.clear();
     return *this;
 }
 
 BinaryNode &BinaryNode::setBytes(std::vector<uint8_t> b) {
-    contentType = Content::Bytes; bytes = std::move(b); text.clear(); children.clear();
+    contentType = Content::Bytes; bytes = compat::move(b); text.clear(); children.clear();
     return *this;
 }
 
 BinaryNode &BinaryNode::setList(std::vector<BinaryNode> kids) {
-    contentType = Content::List; children = std::move(kids); text.clear(); bytes.clear();
+    contentType = Content::List; children = compat::move(kids); text.clear(); bytes.clear();
     return *this;
 }
 
@@ -120,7 +120,7 @@ BinaryNode &BinaryNode::addChild(BinaryNode c) {
         text.clear();
         bytes.clear();
     }
-    children.push_back(std::move(c));
+    children.push_back(compat::move(c));
     return *this;
 }
 
@@ -262,7 +262,7 @@ public:
 
     void stringRaw(const std::string &s) {
         byteLength(s.size());
-        raw(reinterpret_cast<const uint8_t *>(s.data()), s.size());
+        raw(reinterpret_cast<const uint8_t *>(wa::compat::dataOf(s)), s.size());
     }
 
     void jidValue(const Jid &j) {
@@ -347,7 +347,7 @@ void writeNode(const BinaryNode &node, Writer &w) {
         break;
     case BinaryNode::Content::Bytes:
         w.byteLength(node.bytes.size());
-        w.raw(node.bytes.data(), node.bytes.size());
+        w.raw(wa::compat::dataOf(node.bytes), node.bytes.size());
         break;
     case BinaryNode::Content::List: {
         w.listStart(int(node.children.size()));
@@ -494,7 +494,7 @@ BinaryNode readNode(Reader &r) {
             std::vector<BinaryNode> kids;
             kids.reserve(size_t(size));
             for (int i = 0; i < size; i++) kids.push_back(readNode(r));
-            node.setList(std::move(kids));
+            node.setList(compat::move(kids));
         } else {
             switch (tag) {
             case BINARY_8:
@@ -552,7 +552,7 @@ DecodeResult decode(const uint8_t *data, size_t len, size_t *consumed) {
             payload.assign(data + 1, data + len);
             used = len;
         }
-        Reader r(payload.data(), payload.size());
+        Reader r(wa::compat::dataOf(payload), payload.size());
         res.node = readNode(r);
         res.ok = true;
         if (consumed) *consumed = used;
@@ -564,7 +564,7 @@ DecodeResult decode(const uint8_t *data, size_t len, size_t *consumed) {
 }
 
 DecodeResult decode(const std::vector<uint8_t> &frame, size_t *consumed) {
-    return decode(frame.data(), frame.size(), consumed);
+    return decode(wa::compat::dataOf(frame), frame.size(), consumed);
 }
 
 std::vector<uint8_t> packBytes(const std::string &str, bool nibble) {
@@ -575,7 +575,7 @@ std::vector<uint8_t> packBytes(const std::string &str, bool nibble) {
 }
 
 std::string unpackBytes(const std::vector<uint8_t> &packedBytes, bool nibble) {
-    Reader r(packedBytes.data(), packedBytes.size());
+    Reader r(wa::compat::dataOf(packedBytes), packedBytes.size());
     return readPacked8(r, nibble ? NIBBLE_8 : HEX_8);
 }
 

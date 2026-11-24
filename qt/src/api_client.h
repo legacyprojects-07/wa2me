@@ -14,7 +14,7 @@
 #include <QFile>
 #include <QList>
 
-#include <functional>
+#include "direct/callable.h"   // wa::function (STLport-safe wa::function)
 
 #include "models.h"
 
@@ -159,7 +159,7 @@ private:
                                  const QString &fileField = "file");
     void setAuthHeader(QNetworkRequest &req) const;
     // Runs `ok` on a successful JSON reply, or emits errorOccurred otherwise.
-    void handleJson(QNetworkReply *reply, std::function<void(const QJsonDocument &)> ok);
+    void handleJson(QNetworkReply *reply, wa::function<void(const QJsonDocument &)> ok);
     static QString enc(const QString &s); // percent-encode path segment
     static Chat parseChat(const QJsonObject &o);
     static Message parseMessage(const QJsonObject &o);

@@ -18,7 +18,8 @@
 
 #pragma once
 
-#include <cstdint>
+#include <stdint.h>
+#include "compat.h"
 #include <string>
 #include <vector>
 #include <utility>
@@ -64,9 +65,9 @@ struct BinaryNode {
     std::vector<BinaryNode> children;  // Content::List
 
     BinaryNode() : contentType(Content::None) {}
-    explicit BinaryNode(std::string t) : contentType(Content::None), tag(std::move(t)) {}
+    explicit BinaryNode(std::string t) : tag(compat::move(t)), contentType(Content::None) {}
     BinaryNode(std::string t, std::vector<std::pair<std::string, std::string>> a)
-        : contentType(Content::None), tag(std::move(t)), attrs(std::move(a)) {}
+        : tag(compat::move(t)), attrs(compat::move(a)), contentType(Content::None) {}
 
     // Attribute helpers (set/get/replace, order-preserving).
     const std::string *attr(const std::string &key) const;

@@ -112,8 +112,8 @@ Bytes encodeClientHello(const ClientHello &hello) {
     if (!hello.payload.empty()) inner.fieldBytes(3, hello.payload);
 
     Writer outer;
-    outer.fieldMessage(2, inner.data());   // clientHello = 2
-    return outer.data();
+    outer.fieldMessage(2, inner.bytes());   // clientHello = 2
+    return outer.bytes();
 }
 
 bool decodeServerHello(const Bytes &bytes, ServerHello &out) {
@@ -142,8 +142,8 @@ Bytes encodeClientFinish(const ClientFinish &finish) {
     if (!finish.payload.empty()) inner.fieldBytes(2, finish.payload);
 
     Writer outer;
-    outer.fieldMessage(4, inner.data());   // clientFinish = 4
-    return outer.data();
+    outer.fieldMessage(4, inner.bytes());   // clientFinish = 4
+    return outer.bytes();
 }
 
 // ── CertChain ──────────────────────────────────────────────────────────────
@@ -185,7 +185,7 @@ static Bytes encodeUserAgent(const UserAgent &ua) {
         ver.fieldVarint(1, ua.appVersion.primary);
         ver.fieldVarint(2, ua.appVersion.secondary);
         ver.fieldVarint(3, ua.appVersion.tertiary);
-        w.fieldMessage(2, ver.data());
+        w.fieldMessage(2, ver.bytes());
     }
     w.fieldString(3, ua.mcc);
     w.fieldString(4, ua.mnc);
@@ -197,7 +197,7 @@ static Bytes encodeUserAgent(const UserAgent &ua) {
     w.fieldVarint(10, ua.releaseChannel);
     w.fieldString(11, ua.localeLanguageIso6391);
     w.fieldString(12, ua.localeCountryIso31661Alpha2);
-    return w.data();
+    return w.bytes();
 }
 
 static Bytes encodeDevicePairing(const DevicePairingData &d) {
@@ -210,7 +210,7 @@ static Bytes encodeDevicePairing(const DevicePairingData &d) {
     if (!d.eSkeySig.empty()) w.fieldBytes(6, d.eSkeySig);
     if (!d.buildHash.empty()) w.fieldBytes(7, d.buildHash);
     if (!d.deviceProps.empty()) w.fieldBytes(8, d.deviceProps);
-    return w.data();
+    return w.bytes();
 }
 
 Bytes encodeClientPayload(const ClientPayload &p) {
@@ -223,7 +223,7 @@ Bytes encodeClientPayload(const ClientPayload &p) {
         w.fieldMessage(5, encodeUserAgent(p.userAgent));
         Writer webInfo;
         webInfo.fieldVarint(4, p.webSubPlatform);
-        w.fieldMessage(6, webInfo.data());
+        w.fieldMessage(6, webInfo.bytes());
     }
 
     w.fieldVarint(12, p.connectType);
@@ -233,7 +233,7 @@ Bytes encodeClientPayload(const ClientPayload &p) {
         w.fieldMessage(19, encodeDevicePairing(p.devicePairingData));
     }
     if (p.hasPull) w.fieldBool(33, p.pull);
-    return w.data();
+    return w.bytes();
 }
 
 Bytes encodeDeviceProps(const std::string &os, uint32_t platformType,
@@ -255,15 +255,15 @@ Bytes encodeDeviceProps(const std::string &os, uint32_t platformType,
     hs.fieldBool(11, h.supportHostedGroupMsg);
     hs.fieldBool(12, h.supportFbidBotChatHistory);
     hs.fieldBool(14, h.supportMessageAssociation);
-    w.fieldMessage(5, hs.data());
-    return w.data();
+    w.fieldMessage(5, hs.bytes());
+    return w.bytes();
 }
 
 Bytes encodeBigEndian(uint64_t value, int bytes) {
     Bytes out;
     if (bytes == 0) {
         // Minimal big-endian representation (Baileys' encodeBigEndian default).
-        if (value == 0) return Bytes{0};
+        if (value == 0) return compat::bytes(0);
         while (value > 0) {
             out.insert(out.begin(), uint8_t(value & 0xff));
             value >>= 8;
@@ -339,7 +339,7 @@ Bytes md5(const Bytes &data) {
     while (msg.size() % 64 != 56) msg.push_back(0x00);
     for (int i = 0; i < 8; i++) msg.push_back(uint8_t((bitLen >> (8 * i)) & 0xff));
 
-    for (size_t off = 0; off < msg.size(); off += 64) md.process(msg.data() + off);
+    for (size_t off = 0; off < msg.size(); off += 64) md.process(wa::compat::dataOf(msg) + off);
 
     Bytes out(16);
     const uint32_t words[4] = {md.a0, md.b0, md.c0, md.d0};

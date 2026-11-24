@@ -16,8 +16,8 @@
 
 #pragma once
 
-#include <cstdint>
-#include <functional>
+#include <stdint.h>
+#include "callable.h"
 #include <string>
 #include <vector>
 
@@ -63,7 +63,7 @@ public:
     Bytes encodeFrame(const Bytes &data);          // adds header/length prefix
     // Feeds raw websocket bytes; invokes onFrame for each complete payload.
     void decodeFrames(const Bytes &newData,
-                      const std::function<void(const Bytes &)> &onFrame);
+                      const wa::function<void(const Bytes &)> &onFrame);
 
     bool isFinished() const { return finished_; }
     const Bytes &hash() const { return hash_; }

@@ -10,11 +10,13 @@
 // work fine; these are used everywhere anyway to keep one code path.
 
 #include <cerrno>
-#include <cstdint>
+#include <cstddef>
 #include <cstdio>
 #include <cstdlib>
 #include <ctime>
+#include <stdint.h>   // <cstdint> does not exist in STLport 5
 #include <string>
+#include <vector>
 
 // Toolchain floor: this project is C++11. GCC 4.6 is the oldest compiler known
 // to handle it (Symbian GCGE 4.6.3); GCC 4.4 (MinGW in the Qt Simulator kit of
@@ -27,6 +29,59 @@
 
 namespace wa {
 namespace compat {
+
+// ── Container helpers ───────────────────────────────────────────────────────
+// `compat::bytes(0x05)` and `compat::move(x)` need C++11 *library* support that STLport 5
+// (the STL shipped with the Symbian SDK) does not have. These are the
+// replacements used throughout the protocol code.
+inline std::vector<uint8_t> bytes(uint8_t a) { return std::vector<uint8_t>(1, a); }
+
+inline std::vector<uint8_t> bytes(uint8_t a, uint8_t b) {
+    std::vector<uint8_t> out;
+    out.push_back(a);
+    out.push_back(b);
+    return out;
+}
+
+inline std::vector<uint8_t> bytes(uint8_t a, uint8_t b, uint8_t c) {
+    std::vector<uint8_t> out;
+    out.push_back(a);
+    out.push_back(b);
+    out.push_back(c);
+    return out;
+}
+
+inline std::vector<uint8_t> bytes(uint8_t a, uint8_t b, uint8_t c, uint8_t d) {
+    std::vector<uint8_t> out;
+    out.push_back(a);
+    out.push_back(b);
+    out.push_back(c);
+    out.push_back(d);
+    return out;
+}
+
+// std::vector::data() is C++11 and STLport 5.2 does not have it (it also has
+// no emplace_back or initializer lists). std::string::data() is fine, so both
+// are covered here.
+template <typename T> inline T *dataOf(std::vector<T> &v) {
+    return v.empty() ? 0 : &v[0];
+}
+
+template <typename T> inline const T *dataOf(const std::vector<T> &v) {
+    return v.empty() ? 0 : &v[0];
+}
+
+inline const char *dataOf(const std::string &s) { return s.data(); }
+
+inline std::vector<uint8_t> bytesFromText(const char *text) {
+    std::vector<uint8_t> out;
+    while (text && *text) out.push_back(uint8_t(*text++));
+    return out;
+}
+
+// Stand-in for std::move: it copies. The call sites only used it to avoid a
+// copy right before the source is cleared, so plain assignment is correct.
+template <typename T> T &move(T &value) { return value; }
 
 inline std::string toString(int v) {
     char buf[24];

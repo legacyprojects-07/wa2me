@@ -3,7 +3,8 @@
 // The client targets the Symbian toolchain, whose newest Qt is 4.7.4. Three
 // things that later Qt versions made easy are missing there:
 //
-//   * functor connections  -> SignalHook runs a std::function from a signal
+//   * functor connections  -> SignalHook runs a wa::function from a signal
+//     (wa::function, not wa::function: Symbian's STLport 5 has no <functional>)
 //   * QJson*               -> qt4compat/json.h
 //   * a few QString helpers (QStringLiteral, toHtmlEscaped) and the
 //     QDateTime/QNetworkReply spellings used below
@@ -24,7 +25,7 @@
 #include <QString>
 #include <QUrl>
 
-#include <functional>
+#include "direct/callable.h"   // wa::function (STLport-safe wa::function)
 
 // QStringLiteral arrived in Qt 5.4.
 #if QT_VERSION < QT_VERSION_CHECK(5, 4, 0)
@@ -66,21 +67,21 @@ class SignalHook : public QObject {
     Q_OBJECT
 public:
     static void attach(QObject *sender, const char *signal,
-                       const std::function<void()> &fn, bool singleShot = true);
+                       const wa::function<void()> &fn, bool singleShot = true);
     static void attach(QObject *sender, const char *signal,
-                       const std::function<void(const QString &)> &fn,
+                       const wa::function<void(const QString &)> &fn,
                        bool singleShot = true);
     static void attach(QObject *sender, const char *signal,
-                       const std::function<void(const QString &, const QString &)> &fn,
+                       const wa::function<void(const QString &, const QString &)> &fn,
                        bool singleShot = true);
     static void attach(QObject *sender, const char *signal,
-                       const std::function<void(int, int, int)> &fn, bool singleShot = true);
+                       const wa::function<void(int, int, int)> &fn, bool singleShot = true);
     static void attach(QObject *sender, const char *signal,
-                       const std::function<void(const QString &, bool, const QString &)> &fn,
+                       const wa::function<void(const QString &, bool, const QString &)> &fn,
                        bool singleShot = true);
 
     // Convenience for QNetworkReply::finished().
-    static void onFinished(QNetworkReply *reply, const std::function<void()> &fn) {
+    static void onFinished(QNetworkReply *reply, const wa::function<void()> &fn) {
         if (!reply) return;
         attach(reply, SIGNAL(finished()), fn);
     }
@@ -98,10 +99,10 @@ private slots:
 private:
     void finishUp();
 
-    std::function<void()> m_f0;
-    std::function<void(const QString &)> m_f1s;
-    std::function<void(const QString &, const QString &)> m_f2ss;
-    std::function<void(int, int, int)> m_f3i;
-    std::function<void(const QString &, bool, const QString &)> m_fsbs;
+    wa::function<void()> m_f0;
+    wa::function<void(const QString &)> m_f1s;
+    wa::function<void(const QString &, const QString &)> m_f2ss;
+    wa::function<void(int, int, int)> m_f3i;
+    wa::function<void(const QString &, bool, const QString &)> m_fsbs;
     bool m_singleShot;
 };

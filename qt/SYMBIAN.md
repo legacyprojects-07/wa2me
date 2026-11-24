@@ -171,6 +171,34 @@ runtime switch (`--direct` or *Connection ▸ Direct WhatsApp Web mode*).
    `qt/tests/gcc46_check.sh` is the gate: it greps the sources for anything
    GCC 4.6 rejects and compiles the protocol core with `-std=c++0x`.
 
+1b. ~~The Symbian STL.~~ **Done.** GCGE 4.6.3 is only half of it: the SDK's
+   standard library is **STLport 5.2**, which predates C++11 entirely. It has
+   no `std::function`, no `shared_ptr`/`unique_ptr`, no `<initializer_list>`,
+   no `<random>`, no `<cstdint>`, no `std::move`, no `vector::data()` and no
+   `emplace_back`. The replacements:
+
+   | Missing | Replacement |
+   |---|---|
+   | `std::function<R(A…)>` | `wa::function<R(A…)>` (`src/direct/callable.h`, 0–3 args, SFINAE-constrained so the `SignalHook::attach` overloads stay unambiguous) |
+   | `std::shared_ptr` | `wa::json::NodePtr`, a refcounted handle inside the JSON shim |
+   | `std::unique_ptr` | plain pointers, deleted in `~WhatsAppDirect()` |
+   | `std::initializer_list` / `X{1,2}` | `compat::bytes(…)`, `compat::bytesFromText(…)`, `jsonObj("k", v, …)` instead of `QJsonObject{{…}}` |
+   | `vector::data()` | `compat::dataOf(v)` (works for `std::vector` and `std::string`) |
+   | `std::move` | `compat::move(x)` — copies; the sources only used it before clearing |
+   | `<cstdint>`, `<random>`, `<chrono>` | `<stdint.h>`, `/dev/urandom` + clock entropy, `compat::clockTicks()` |
+
+   Both halves are enforced by `qt/tests/gcc46_check.sh`, whose second section
+   greps for every construct above.
+
+1c. ~~moc.~~ **Done.** Qt 4.7's moc is much stricter than g++: a `struct`,
+   `enum`, `typedef` or data member inside a `signals:` block aborts the build
+   with `Error: Not a signal or slot declaration` (this is exactly what the
+   first device build hit at `whatsapp_direct.h:155`). The nested
+   `PendingSend`/`PendingUpload`/`PendingGroupOp` structs now live in the
+   `private:` section, and `qt/tests/moc_check.sh` fails if a declaration like
+   that reappears in a `signals:`/`slots:` block (and runs the real `moc` when
+   one is on `PATH`).
+
 2. **OpenSSL in the Qt build.** Nokia's *Qt 4.7.4 for Symbian* ships with SSL
    enabled; a self-built Qt without `-openssl` gives you a device that can run
    proxy mode but never finishes a direct-mode handshake. Check the log line

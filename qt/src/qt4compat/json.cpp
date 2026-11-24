@@ -343,12 +343,12 @@ void writeValue(QByteArray &out, const NodePtr &node, bool indented, int depth) 
     }
 }
 
-std::shared_ptr<Node> objectField(const NodePtr &node, const QString &key) {
-    if (!node) return std::shared_ptr<Node>();
+NodePtr objectField(const NodePtr &node, const QString &key) {
+    if (!node) return NodePtr();
     for (size_t k = 0; k < node->fields.size(); k++) {
         if (node->fields[k].first == key) return node->fields[k].second;
     }
-    return std::shared_ptr<Node>();
+    return NodePtr();
 }
 
 } // namespace
@@ -488,14 +488,6 @@ bool QJsonValue::operator==(const QJsonValue &other) const {
 
 QJsonObject::QJsonObject() : d(wa::json::makeNode(wa::json::Node::Object)) {}
 
-QJsonObject::QJsonObject(std::initializer_list<Entry> entries)
-    : d(wa::json::makeNode(wa::json::Node::Object)) {
-    for (std::initializer_list<Entry>::const_iterator it = entries.begin(); it != entries.end();
-         ++it) {
-        insert(it->first, it->second);
-    }
-}
-
 QJsonObject QJsonObject::fromNode(const wa::json::NodePtr &n) {
     QJsonObject object;
     object.d = n ? n : object.d;
@@ -592,13 +584,6 @@ QJsonObject::value_ref &QJsonObject::value_ref::operator=(double value) {
 // ── QJsonArray ───────────────────────────────────────────────────────────
 
 QJsonArray::QJsonArray() : d(wa::json::makeNode(wa::json::Node::Array)) {}
-
-QJsonArray::QJsonArray(std::initializer_list<QJsonValue> values)
-    : d(wa::json::makeNode(wa::json::Node::Array)) {
-    for (std::initializer_list<QJsonValue>::const_iterator it = values.begin();
-         it != values.end(); ++it)
-        append(*it);
-}
 
 QJsonArray QJsonArray::fromNode(const wa::json::NodePtr &n) {
     QJsonArray array;

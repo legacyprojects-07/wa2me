@@ -1,4 +1,5 @@
 #include "ed25519.h"
+#include "compat.h"
 
 #include <cstring>
 
@@ -383,7 +384,7 @@ void convertPublicKey(uint8_t *ed, const uint8_t *mont) {
 
 void cryptoHash(uint8_t *out, const uint8_t *m, size_t n) {
     const Bytes h = sha512(m, n);
-    std::memcpy(out, h.data(), 64);
+    std::memcpy(out, wa::compat::dataOf(h), 64);
 }
 
 // XEdDSA/curve25519-js "crypto_sign_direct": the secret *scalar* is the
@@ -425,7 +426,7 @@ bool edVerify(const uint8_t *m, size_t n, const uint8_t *sig, const uint8_t *pk)
     sm.insert(sm.end(), pk, pk + 32);     // A
     sm.insert(sm.end(), m, m + n);
 
-    cryptoHash(h, sm.data(), sm.size());
+    cryptoHash(h, wa::compat::dataOf(sm), sm.size());
     reduce(h);
     scalarmult(p, q, h);
 
@@ -455,16 +456,16 @@ Bytes sha512(const uint8_t *data, size_t len) {
     return s.final();
 }
 
-Bytes sha512(const Bytes &data) { return sha512(data.data(), data.size()); }
+Bytes sha512(const Bytes &data) { return sha512(wa::compat::dataOf(data), data.size()); }
 
 Bytes ed25519PublicKeyFromSeed(const Bytes &seed) {
     if (seed.size() != 32) return Bytes();
     // XEdDSA form: A = clamp(seed) * B (curve25519-js does not hash the seed).
     const Bytes sk = clampedCopy(seed);
     gf p[4];
-    scalarbase(p, sk.data());
+    scalarbase(p, wa::compat::dataOf(sk));
     Bytes pub(32);
-    pack(pub.data(), p);
+    pack(wa::compat::dataOf(pub), p);
     return pub;
 }
 
@@ -480,7 +481,7 @@ Bytes xeddsaSign(const Bytes &privateKey, const Bytes &message) {
     const uint8_t signBit = uint8_t(edsk[63] & 128);
 
     Bytes sm(64 + message.size());
-    edSign(sm.data(), message.data(), message.size(), edsk.data());
+    edSign(wa::compat::dataOf(sm), wa::compat::dataOf(message), message.size(), wa::compat::dataOf(edsk));
     Bytes sig(sm.begin(), sm.begin() + 64);
     sig[63] |= signBit;   // carry A's sign bit in the signature
     return sig;
@@ -490,13 +491,13 @@ bool xeddsaVerify(const Bytes &publicKey, const Bytes &message, const Bytes &sig
     if (publicKey.size() != 32 || signature.size() != 64) return false;
 
     Bytes edpk(32);
-    convertPublicKey(edpk.data(), publicKey.data());
+    convertPublicKey(wa::compat::dataOf(edpk), wa::compat::dataOf(publicKey));
 
     Bytes sig = signature;
     edpk[31] |= uint8_t(sig[63] & 128);   // restore A's sign bit
     sig[63] &= 127;
 
-    return edVerify(message.data(), message.size(), sig.data(), edpk.data());
+    return edVerify(wa::compat::dataOf(message), message.size(), wa::compat::dataOf(sig), wa::compat::dataOf(edpk));
 }
 
 Bytes x25519PublicFromPrivate(const Bytes &privateKey) {
@@ -504,17 +505,17 @@ Bytes x25519PublicFromPrivate(const Bytes &privateKey) {
     Bytes out(32);
     gf p[4];
     const Bytes sk = clampedCopy(privateKey);
-    scalarbase(p, sk.data());
+    scalarbase(p, wa::compat::dataOf(sk));
     gf y, one, num, den, inv, u;
     set25519(one, kGf1);
     Bytes yBytes(32);
-    pack(yBytes.data(), p);
-    unpack25519(y, yBytes.data());
+    pack(wa::compat::dataOf(yBytes), p);
+    unpack25519(y, wa::compat::dataOf(yBytes));
     A(num, one, y);
     Z(den, one, y);
     inv25519(inv, den);
     M(u, num, inv);
-    pack25519(out.data(), u);
+    pack25519(wa::compat::dataOf(out), u);
     return out;
 }
 

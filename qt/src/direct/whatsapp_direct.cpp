@@ -1,4 +1,5 @@
 #include "whatsapp_direct.h"
+#include "compat.h"
 
 #include <QFile>
 #include <QFileInfo>
@@ -31,7 +32,7 @@ const char *const kWebSocketUrl = "wss://web.whatsapp.com/ws/chat";
 const char *const kOrigin = "https://web.whatsapp.com";
 
 QByteArray toQ(const Bytes &b) {
-    return QByteArray(reinterpret_cast<const char *>(b.data()), int(b.size()));
+    return QByteArray(reinterpret_cast<const char *>(wa::compat::dataOf(b)), int(b.size()));
 }
 Bytes toStd(const QByteArray &b) {
     return Bytes(reinterpret_cast<const uint8_t *>(b.constData()),
@@ -150,9 +151,13 @@ private:
 };
 
 WhatsAppDirect::WhatsAppDirect(QObject *parent)
-    : m_nextPreKeyId(1),
+    : m_store(0),
+      m_senderKeys(0),
+      m_net(0),
+      m_nextPreKeyId(1),
       m_lastUploadedPreKeyId(0),
       m_preKeysUploaded(false),
+      m_noise(0),
       m_signedPreKeyId(1),
       m_registrationId(0),
       m_browserOs("Ubuntu"),
@@ -187,13 +192,15 @@ WhatsAppDirect::WhatsAppDirect(QObject *parent)
     connect(&m_socket, SIGNAL(error(QString)), this, SLOT(onSocketError(QString)));
 
     m_net = new QNetworkAccessManager(this);
-    m_store.reset(new CredsStore(this));
-    m_senderKeys.reset(new SenderKeysStore(this));
+    m_store = new CredsStore(this);          // QObject child: deleted with us
+    m_senderKeys = new SenderKeysStore(this);
 
     m_credsPath = QDir::homePath() + "/.openknot-qt/creds.json";
 }
 
-WhatsAppDirect::~WhatsAppDirect() = default;
+WhatsAppDirect::~WhatsAppDirect() {
+    delete m_noise;   // m_net/m_store/m_senderKeys are QObject children
+}
 
 void WhatsAppDirect::setCredentialsPath(const QString &path) { m_credsPath = path; }
 
@@ -411,7 +418,8 @@ void WhatsAppDirect::sendClientHello() {
     m_ephPriv = toQ(eph.priv);
     m_ephPub = toQ(eph.pub);
     // std::make_unique is C++14; the Symbian toolchain stops earlier.
-    m_noise.reset(new wa::noise::NoiseHandler(eph.priv, eph.pub));
+    delete m_noise;   // a reconnect replaces the handler
+    m_noise = new wa::noise::NoiseHandler(eph.priv, eph.pub);
 
     wa::proto::ClientHello hello;
     hello.ephemeral = eph.pub;
@@ -476,7 +484,7 @@ bool WhatsAppDirect::sendClientFinish() {
 
         auto &d = payload.devicePairingData;
         d.eRegid = wa::proto::encodeBigEndian(m_registrationId);
-        d.eKeytype = Bytes{5};   // KEY_BUNDLE_TYPE
+        d.eKeytype = wa::compat::bytes(5);   // KEY_BUNDLE_TYPE
         d.eIdent = toStd(m_identityPub);
         d.eSkeyId = wa::proto::encodeBigEndian(m_signedPreKeyId, 3);
         d.eSkeyVal = toStd(m_signedPreKeyPub);
@@ -739,7 +747,7 @@ void WhatsAppDirect::handleEncryptedMessage(const BinaryNode &node) {
     wa::messaging::IncomingMessage msg;
     std::string error;
 
-    if (!wa::messaging::decryptMessageNode(*m_store, m_senderKeys.get(), node, meJid, msg,
+    if (!wa::messaging::decryptMessageNode(*m_store, m_senderKeys, node, meJid, msg,
                                           error)) {
         // Baileys sends a retry receipt so the sender re-encrypts with a fresh
         // pre-key message; we log instead (see QT_PORT.md §6).
@@ -1059,7 +1067,7 @@ void WhatsAppDirect::startMediaUpload(const PendingSend &pending) {
 
     const QString uploadId = pending.msgId;
     QNetworkReply *reply = m_net->post(
-        request, QByteArray(reinterpret_cast<const char *>(upload.uploaded.blob.data()),
+        request, QByteArray(reinterpret_cast<const char *>(wa::compat::dataOf(upload.uploaded.blob)),
                             int(upload.uploaded.blob.size())));
     emit mediaProgress(uploadId, "uploading");
     DLOG(this, QString("uploading %1 (%2 encrypted bytes) to the CDN")
@@ -1164,7 +1172,7 @@ bool WhatsAppDirect::downloadMedia(const QString &chatJid, const QString &msgId,
                     emit mediaFailed(chatJid, msgId, "cannot write " + savePath);
                     return;
                 }
-                out.write(QByteArray(reinterpret_cast<const char *>(plaintext.data()),
+                out.write(QByteArray(reinterpret_cast<const char *>(wa::compat::dataOf(plaintext)),
                                      int(plaintext.size())));
                 out.close();
                 emit mediaSaved(chatJid, msgId, savePath);
@@ -1599,7 +1607,7 @@ void WhatsAppDirect::ensurePreKeys(int count) {
         o["id"] = int(m_nextPreKeyId++);
         // Store the raw 32-byte halves; the Signal layer adds the 0x05 prefix.
         o["priv"] = b64(toQ(kp.priv));
-        o["pub"] = b64(QByteArray(reinterpret_cast<const char *>(kp.pub.data()) + 1, 32));
+        o["pub"] = b64(QByteArray(reinterpret_cast<const char *>(wa::compat::dataOf(kp.pub)) + 1, 32));
         m_preKeys.append(o);
     }
 }
@@ -1622,7 +1630,7 @@ void WhatsAppDirect::uploadPreKeys() {
     reg[2] = uint8_t(m_registrationId >> 8);
     reg[3] = uint8_t(m_registrationId);
     iq.addChild(BinaryNode("registration").setBytes(reg));
-    iq.addChild(BinaryNode("type").setBytes(Bytes{0x05}));
+    iq.addChild(BinaryNode("type").setBytes(wa::compat::bytes(0x05)));
     iq.addChild(BinaryNode("identity").setBytes(toStd(m_identityPub)));
 
     BinaryNode list("list");
@@ -1632,8 +1640,7 @@ void WhatsAppDirect::uploadPreKeys() {
         const quint32 id = quint32(o.value("id").toInt());
         if (id <= m_lastUploadedPreKeyId) continue;   // already on the server
         BinaryNode key("key");
-        key.addChild(BinaryNode("id").setBytes(Bytes{uint8_t(id >> 16), uint8_t(id >> 8),
-                                                     uint8_t(id)}));
+        key.addChild(BinaryNode("id").setBytes(wa::compat::bytes(uint8_t(id >> 16), uint8_t(id >> 8), uint8_t(id))));
         key.addChild(BinaryNode("value").setBytes(toStd(fromB64(o.value("pub").toString()))));
         list.addChild(key);
         uploaded = qMax(uploaded, id);
@@ -1643,8 +1650,7 @@ void WhatsAppDirect::uploadPreKeys() {
 
     quint32 skId = m_signedPreKeyId;
     BinaryNode skey("skey");
-    skey.addChild(BinaryNode("id").setBytes(Bytes{uint8_t(skId >> 16), uint8_t(skId >> 8),
-                                                  uint8_t(skId)}));
+    skey.addChild(BinaryNode("id").setBytes(wa::compat::bytes(uint8_t(skId >> 16), uint8_t(skId >> 8), uint8_t(skId))));
     skey.addChild(BinaryNode("value").setBytes(toStd(m_signedPreKeyPub)));
     skey.addChild(BinaryNode("signature").setBytes(toStd(m_signedPreKeySig)));
     iq.addChild(skey);

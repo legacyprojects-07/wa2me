@@ -56,6 +56,43 @@ else
 fi
 
 echo
+echo "== constructs the Symbian STL (STLport 5.2) does not have"
+# The Symbian SDK ships STLport 5.2, which predates C++11: no <functional>
+# std::function, no smart pointers, no initializer_list, no <random>, no
+# <cstdint>, no std::move, no vector::data()/emplace_back. wa::function,
+# compat::bytes/bytesFromText/move/dataOf and jsonObj() exist for exactly this
+# reason — see qt/src/direct/callable.h and compat.h.
+
+check "no std::function (use wa::function)"     'std::function'
+check "no std::shared_ptr/std::unique_ptr"      'std::(shared|unique|weak)_ptr'
+check "no std::make_shared"                     'std::make_shared'
+check "no std::initializer_list"                'initializer_list'
+check "no std::move (use compat::move)"         'std::move\('
+check "no std::unordered_*"                     'std::unordered_'
+check "no std::random_device / <random>"        '(std::random_device|<random>)'
+check "no std::atomic/thread/mutex/regex"       'std::(atomic|thread|mutex|regex)'
+check "no <cstdint> (use <stdint.h>)"           '#include[[:space:]]*<cstdint>'
+check "no <memory>/<functional>/<chrono>/<array>/<tuple>" \
+      '#include[[:space:]]*<(memory|functional|chrono|array|tuple)>'
+check "no emplace/emplace_back"                 '\bemplace(_back)?[[:space:]]*\('
+check "no braced container initialisation"      '(Bytes|std::vector|std::string|std::map|QStringList)[[:space:]]*\{'
+
+# vector::data() is C++11; STLport 5.2 has no such member. The protocol core
+# therefore goes through compat::dataOf() (vector *and* string) and the proto
+# Reader/Writer expose bytes(). whatsapp_direct.cpp is Qt glue and may use
+# QByteArray::data(), which Qt 4 has always had.
+hits=$(grep -rnE '\.data\(\)' qt/src/direct --include=*.h --include=*.cpp 2>/dev/null |
+       grep -v 'whatsapp_direct.cpp' |
+       grep -v '^qt/src/direct/compat.h:')
+if [ -n "$hits" ]; then
+    echo "FAIL no .data() in the protocol core (use compat::dataOf / bytes())"
+    echo "$hits" | head -20 | sed 's/^/     /'
+    fail=1
+else
+    echo "ok   no .data() in the protocol core (use compat::dataOf / bytes())"
+fi
+
+echo
 echo "== protocol core compiles as -std=c++0x (GCC 4.6's C++11)"
 for f in qt/src/direct/*.cpp; do
     # whatsapp_direct.cpp is the Qt glue; qt4_check.sh compiles that one.

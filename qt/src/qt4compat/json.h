@@ -18,13 +18,37 @@
 #include <QStringList>
 #include <QVariant>
 
-#include <initializer_list>
-#include <memory>
 #include <utility>
 #include <vector>
 
 namespace wa {
 namespace json {
+
+struct Node;
+
+// Reference-counted node handle. std::shared_ptr is C++11 and Symbian's
+// STLport 5 does not have it, so the count lives in the node itself.
+class NodePtr {
+public:
+    NodePtr();
+    explicit NodePtr(Node *p);
+    NodePtr(const NodePtr &other);
+    ~NodePtr();
+    NodePtr &operator=(const NodePtr &other);
+
+    void reset(Node *p = 0);
+    Node *get() const { return p_; }
+    Node *operator->() const { return p_; }
+    Node &operator*() const { return *p_; }
+    long use_count() const;
+    bool operator==(const NodePtr &other) const { return p_ == other.p_; }
+    bool operator!=(const NodePtr &other) const { return p_ != other.p_; }
+    operator bool() const { return p_ != 0; }
+
+private:
+    void release();
+    Node *p_;
+};
 
 // One JSON node. Objects keep insertion order, like Qt 5 does.
 struct Node {
@@ -32,13 +56,49 @@ struct Node {
     bool boolean;
     double number;
     QString text;
-    std::vector<std::shared_ptr<Node> > items;                       // array
-    std::vector<std::pair<QString, std::shared_ptr<Node> > > fields;  // object
+    std::vector<NodePtr> items;                             // array
+    std::vector<std::pair<QString, NodePtr> > fields;       // object
+    int refs;                                               // owned by NodePtr
 
-    Node() : kind(Null), boolean(false), number(0) {}
+    Node() : kind(Null), boolean(false), number(0), refs(0) {}
+    // Copying a node copies its value, never the reference count.
+    Node(const Node &other)
+        : kind(other.kind), boolean(other.boolean), number(other.number),
+          text(other.text), items(other.items), fields(other.fields), refs(0) {}
+    Node &operator=(const Node &other) {
+        kind = other.kind;
+        boolean = other.boolean;
+        number = other.number;
+        text = other.text;
+        items = other.items;
+        fields = other.fields;
+        return *this;
+    }
 };
 
-typedef std::shared_ptr<Node> NodePtr;
+inline long NodePtr::use_count() const { return p_ ? long(p_->refs) : 0; }
+
+inline NodePtr::NodePtr() : p_(0) {}
+inline NodePtr::NodePtr(Node *p) : p_(p) { if (p_) ++p_->refs; }
+inline NodePtr::NodePtr(const NodePtr &other) : p_(other.p_) { if (p_) ++p_->refs; }
+inline NodePtr::~NodePtr() { release(); }
+inline void NodePtr::release() {
+    if (p_ && --p_->refs == 0) delete p_;
+    p_ = 0;
+}
+inline NodePtr &NodePtr::operator=(const NodePtr &other) {
+    if (this != &other) {
+        if (other.p_) ++other.p_->refs;
+        release();
+        p_ = other.p_;
+    }
+    return *this;
+}
+inline void NodePtr::reset(Node *p) {
+    if (p) ++p->refs;
+    release();
+    p_ = p;
+}
 
 inline NodePtr makeNode(Node::Kind kind) {
     NodePtr n(new Node);
@@ -103,7 +163,6 @@ public:
     typedef std::pair<QString, QJsonValue> Entry;
 
     QJsonObject();
-    QJsonObject(std::initializer_list<Entry> entries);
 
     int size() const;
     int count() const { return size(); }
@@ -166,7 +225,6 @@ private:
 class QJsonArray {
 public:
     QJsonArray();
-    QJsonArray(std::initializer_list<QJsonValue> values);
 
     int size() const;
     int count() const { return size(); }
@@ -225,4 +283,41 @@ private:
     QJsonValue m_root;
 };
 
+#else  // Qt 5+: the real classes
+
+#include <QJsonArray>
+#include <QJsonDocument>
+#include <QJsonObject>
+#include <QJsonValue>
+
 #endif // QT_VERSION < 5.0.0
+
+// Building an object with 1..3 fields, for both Qt versions.
+//
+//   QJsonObject body = jsonObj("jid", jid, "text", text);
+//
+// instead of QJsonObject{{"jid", jid}, {"text", text}}: the braced form needs
+// std::initializer_list, which Symbian's STLport 5 does not have.
+inline QJsonObject jsonObj(const QString &k1, const QJsonValue &v1) {
+    QJsonObject o;
+    o.insert(k1, v1);
+    return o;
+}
+
+inline QJsonObject jsonObj(const QString &k1, const QJsonValue &v1,
+                           const QString &k2, const QJsonValue &v2) {
+    QJsonObject o;
+    o.insert(k1, v1);
+    o.insert(k2, v2);
+    return o;
+}
+
+inline QJsonObject jsonObj(const QString &k1, const QJsonValue &v1,
+                           const QString &k2, const QJsonValue &v2,
+                           const QString &k3, const QJsonValue &v3) {
+    QJsonObject o;
+    o.insert(k1, v1);
+    o.insert(k2, v2);
+    o.insert(k3, v3);
+    return o;
+}
