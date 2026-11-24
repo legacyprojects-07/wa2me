@@ -9,6 +9,7 @@
 #include <QNetworkRequest>
 #include <QUrl>
 #include <QDebug>
+#include <QSslSocket>
 
 #include <set>
 
@@ -310,6 +311,20 @@ void WhatsAppDirect::connectToWhatsApp() {
     const QString userAgent =
         QString("Mozilla/5.0 (%1) AppleWebKit/537.36 (KHTML, like Gecko) "
                 "Chrome/120.0.0.0 Safari/537.36").arg(m_browserOs);
+
+    // Symbian is the platform where TLS is most likely to be missing: Qt's
+    // QSslSocket needs an OpenSSL build, and a phone without it fails the
+    // handshake with no useful error. Say so up front.
+    if (!QSslSocket::supportsSsl()) {
+        DLOG(this, "WARNING: this Qt build has no TLS (QSslSocket::supportsSsl() "
+                   "is false) - direct mode cannot connect");
+    } else {
+#if QT_VERSION >= QT_VERSION_CHECK(4, 8, 0)
+        DLOG(this, "TLS: " + QSslSocket::sslLibraryVersionString());
+#else
+        DLOG(this, "TLS: available");
+#endif
+    }
 
     emit connectionUpdate("connecting", "opening websocket");
     DLOG(this, "connecting to " + QString::fromLatin1(kWebSocketUrl));
