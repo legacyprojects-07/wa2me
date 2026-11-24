@@ -20,7 +20,10 @@
 #include <string>
 #include <vector>
 
+#include <set>
+
 #include "binary_node.h"
+#include "sender_key.h"
 #include "signal.h"
 #include "wa_proto.h"
 
@@ -50,6 +53,22 @@ bool parseKeyResponse(const BinaryNode &iq, std::vector<DeviceBundle> &out,
 // dropped. The server answers with every device of the requested users.
 BinaryNode buildKeyRequest(const std::string &id, const std::vector<std::string> &jids);
 
+// ── Group metadata (iq xmlns="w:g2") ──────────────────────────────────────
+
+struct GroupInfo {
+    std::string jid;
+    std::string subject;
+    std::string addressingMode;              // "pn" | "lid" (may be empty)
+    std::vector<std::string> participants;   // member jids (devices fetched separately)
+};
+
+// Request: <iq type=get xmlns="w:g2" to=groupJid><query/></iq>
+BinaryNode buildGroupMetadataRequest(const std::string &id, const std::string &groupJid);
+
+// Response: <iq type=result><group id subject addressing_mode>
+//             <participant jid=…/>…</group></iq>
+bool parseGroupMetadata(const BinaryNode &iq, GroupInfo &out, std::string &error);
+
 // ── Outgoing messages ─────────────────────────────────────────────────────
 
 struct SendPlan {
@@ -65,6 +84,23 @@ bool buildTextStanza(signal::Store &store, const std::string &meJid,
                      const std::string &msgId,
                      const std::vector<DeviceBundle> &bundles, SendPlan &out,
                      std::string &error);
+
+// Group text: encrypts once with our sender key (type "skmsg") and wraps the
+// sender-key distribution message in 1:1 encrypted <to> nodes for every device
+// that has not received it yet (`alreadyDistributed`, i.e. sender-key-memory).
+struct GroupSendPlan {
+    BinaryNode stanza;
+    Bytes distribution;                     // serialized SKDM that was sent
+    std::vector<std::string> distributedTo; // device jids that received it
+    size_t deviceCount = 0;
+};
+
+bool buildGroupTextStanza(signal::Store &sessions, signal::SenderKeyStore &senderKeys,
+                          const std::string &meJid, const std::string &groupJid,
+                          const std::string &text, const std::string &msgId,
+                          const std::vector<DeviceBundle> &bundles,
+                          const std::set<std::string> &alreadyDistributed,
+                          GroupSendPlan &out, std::string &error);
 
 // Encrypts one message payload for one device, returning the <to jid><enc>
 // node. A Signal session is built from `device.bundle` when none exists yet
@@ -94,19 +130,33 @@ struct IncomingMessage {
     bool hasHistorySync = false;
     waproto::HistorySyncNotification historySync;
 
+    // Set when this message carried a sender-key distribution message that we
+    // installed (group messages that follow can then be decrypted).
+    bool receivedSenderKey = false;
+
     // Set when an <enc> payload could not be decrypted (retry receipts).
     bool decrypted = false;
     std::string error;
 };
 
+// Signal-encrypted messages that also carry a group sender-key distribution
+// message must be handed to a SenderKeyStore; pass nullptr for pure 1:1 use.
 // Reads routing attributes only (no decryption), like decodeMessageNode.
 bool decodeMessageNode(const BinaryNode &node, const std::string &meJid,
                        IncomingMessage &out, std::string &error);
 
-// decodeMessageNode + Signal decrypt + Message.decode.
-bool decryptMessageNode(signal::Store &store, const BinaryNode &node,
-                        const std::string &meJid, IncomingMessage &out,
-                        std::string &error);
+// decodeMessageNode + Signal decrypt + Message.decode. Handles msg/pkmsg/skmsg
+// and installs sender-key distribution messages (needs `senderKeys` for groups).
+bool decryptMessageNode(signal::Store &store, signal::SenderKeyStore *senderKeys,
+                        const BinaryNode &node, const std::string &meJid,
+                        IncomingMessage &out, std::string &error);
+
+// 1:1-only convenience overload (no sender-key support).
+inline bool decryptMessageNode(signal::Store &store, const BinaryNode &node,
+                               const std::string &meJid, IncomingMessage &out,
+                               std::string &error) {
+    return decryptMessageNode(store, nullptr, node, meJid, out, error);
+}
 
 // ── Helpers ───────────────────────────────────────────────────────────────
 

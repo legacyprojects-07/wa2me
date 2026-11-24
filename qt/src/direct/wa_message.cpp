@@ -3,6 +3,7 @@
 #include <algorithm>
 #include <cstdio>
 
+#include "sender_key.h"
 #include "sha256.h"
 
 namespace wa {
@@ -226,6 +227,114 @@ bool buildTextStanza(signal::Store &store, const std::string &meJid,
     return true;
 }
 
+// ── Group metadata (w:g2) ─────────────────────────────────────────────────
+
+BinaryNode buildGroupMetadataRequest(const std::string &id, const std::string &groupJid) {
+    BinaryNode iq("iq");
+    iq.setAttr("id", id);
+    iq.setAttr("type", "get");
+    iq.setAttr("xmlns", "w:g2");
+    iq.setAttr("to", groupJid);
+    iq.addChild(BinaryNode("query"));
+    return iq;
+}
+
+bool parseGroupMetadata(const BinaryNode &iq, GroupInfo &out, std::string &error) {
+    out = GroupInfo();
+    if (const BinaryNode *err = iq.child("error")) {
+        error = "group metadata query failed: " + err->attrOr("text", err->attrOr("code", "?"));
+        return false;
+    }
+    const BinaryNode *group = iq.child("group");
+    if (!group) {
+        error = "group metadata response has no <group>";
+        return false;
+    }
+    out.jid = group->attrOr("id");
+    out.subject = group->attrOr("subject");
+    out.addressingMode = group->attrOr("addressing_mode");
+    for (const BinaryNode *p : group->childrenNamed("participant")) {
+        const std::string jid = p->attrOr("jid");
+        if (!jid.empty()) out.participants.push_back(jid);
+    }
+    if (out.participants.empty()) {
+        error = "group has no participants";
+        return false;
+    }
+    return true;
+}
+
+// ── Group sending (sender keys) ───────────────────────────────────────────
+
+bool buildGroupTextStanza(signal::Store &sessions, signal::SenderKeyStore &senderKeys,
+                          const std::string &meJid, const std::string &groupJid,
+                          const std::string &text, const std::string &msgId,
+                          const std::vector<DeviceBundle> &bundles,
+                          const std::set<std::string> &alreadyDistributed,
+                          GroupSendPlan &out, std::string &error) {
+    out = GroupSendPlan();
+    if (bundles.empty()) {
+        error = "no device bundles for group members";
+        return false;
+    }
+    if (groupJid.empty()) {
+        error = "empty group jid";
+        return false;
+    }
+
+    // Our chain for this group (created on first send) + the message body.
+    signal::SenderKeyDistribution dist;
+    if (!signal::createSenderKey(senderKeys, groupJid, meJid, dist, error)) return false;
+
+    waproto::Message message;
+    if (!text.empty()) message.conversation = text;
+    const Bytes padded = waproto::padMessage(waproto::encodeMessage(message));
+
+    Bytes skmsg;
+    if (!signal::encryptGroup(senderKeys, groupJid, meJid, padded, skmsg, error)) return false;
+
+    out.distribution = signal::encodeDistribution(dist);
+
+    BinaryNode stanza("message");
+    stanza.setAttr("id", msgId);
+    stanza.setAttr("type", "text");
+    stanza.setAttr("to", groupJid);
+
+    // The body itself, encrypted once with our sender key.
+    BinaryNode enc("enc");
+    enc.setAttr("v", "2");
+    enc.setAttr("type", "skmsg");
+    enc.setBytes(skmsg);
+    stanza.addChild(enc);
+
+    // The distribution message goes to every device that does not have it yet,
+    // inside a normal 1:1 encrypted message.
+    waproto::Message distMessage;
+    distMessage.hasSenderKeyDistribution = true;
+    distMessage.senderKeyDistribution.groupId = groupJid;
+    distMessage.senderKeyDistribution.axolotl = out.distribution;
+
+    BinaryNode participants("participants");
+    for (const auto &bundle : bundles) {
+        const bool isSelf = sameUser(bundle.jid, meJid);
+        if (!isSelf && alreadyDistributed.count(bundle.jid)) continue;
+
+        BinaryNode toNode;
+        bool usedPreKey = false;
+        if (!encryptForDevice(sessions, bundle, distMessage, false, groupJid, toNode,
+                              usedPreKey, error)) {
+            return false;
+        }
+        participants.addChild(toNode);
+        out.distributedTo.push_back(bundle.jid);
+        out.deviceCount++;
+    }
+    if (participants.hasContent()) stanza.addChild(participants);
+
+    out.stanza = stanza;
+    return true;
+}
+
 // ── Incoming messages ─────────────────────────────────────────────────────
 
 bool decodeMessageNode(const BinaryNode &node, const std::string &meJid,
@@ -268,9 +377,9 @@ bool decodeMessageNode(const BinaryNode &node, const std::string &meJid,
     return true;
 }
 
-bool decryptMessageNode(signal::Store &store, const BinaryNode &node,
-                        const std::string &meJid, IncomingMessage &out,
-                        std::string &error) {
+bool decryptMessageNode(signal::Store &store, signal::SenderKeyStore *senderKeys,
+                        const BinaryNode &node, const std::string &meJid,
+                        IncomingMessage &out, std::string &error) {
     if (!decodeMessageNode(node, meJid, out, error)) return false;
 
     std::vector<const BinaryNode *> encNodes = node.childrenNamed("enc");
@@ -300,7 +409,13 @@ bool decryptMessageNode(signal::Store &store, const BinaryNode &node,
         } else if (type == "pkmsg") {
             ok = signal::decrypt(store, address, 3, enc->bytes, plaintext, decryptError);
         } else if (type == "skmsg") {
-            decryptError = "group sender-key messages are not supported yet";
+            if (!senderKeys) {
+                decryptError = "group message without a sender-key store";
+            } else {
+                // Group messages are signed/keyed by (group, author).
+                ok = signal::decryptGroup(*senderKeys, out.chatJid, out.senderJid, enc->bytes,
+                                          plaintext, decryptError);
+            }
         } else {
             decryptError = "unknown enc type: " + type;
         }
@@ -327,6 +442,24 @@ bool decryptMessageNode(signal::Store &store, const BinaryNode &node,
                 if (!message.deviceSentDestinationJid.empty() && !out.isGroup)
                     out.chatJid = message.deviceSentDestinationJid;
                 message = inner;
+            }
+        }
+
+        // A sender-key distribution message from a group member: remember the
+        // chain so their subsequent skmsg bodies can be decrypted.
+        if (message.hasSenderKeyDistribution && senderKeys) {
+            const std::string group = message.senderKeyDistribution.groupId.empty()
+                                          ? out.chatJid
+                                          : message.senderKeyDistribution.groupId;
+            signal::SenderKeyDistribution dist;
+            std::string distError;
+            if (signal::decodeDistribution(message.senderKeyDistribution.axolotl, dist,
+                                           distError) &&
+                signal::processDistribution(*senderKeys, group, out.senderJid, dist,
+                                            distError)) {
+                out.receivedSenderKey = true;
+            } else {
+                out.error = "sender key distribution: " + distError;
             }
         }
 

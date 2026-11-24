@@ -12,9 +12,9 @@
 // Status (see QT_PORT.md §3):
 //   WORKING   : websocket lifecycle, Noise handshake, framing, QR pairing
 //               payloads, stream error handling, keepalive, stanza routing,
-//               1:1 text send/receive (Signal), HistorySync download+decode
-//   TODO      : group sender-key messages (skmsg), media upload/download,
-//               app state (mute/pin/archive), presence privacy.
+//               1:1 text send/receive (Signal), group send/receive
+//               (sender keys, skmsg), HistorySync download+decode
+//   TODO      : app state (mute/pin/archive), presence privacy.
 
 #include <QObject>
 #include <QWebSocket>
@@ -25,6 +25,7 @@
 #include <QJsonArray>
 #include <QVariantMap>
 #include <QHash>
+#include <QSet>
 
 #include <memory>
 #include <vector>
@@ -32,6 +33,7 @@
 #include "binary_node.h"
 #include "models.h"
 #include "noise.h"
+#include "sender_key.h"
 #include "signal.h"
 #include "wa_history.h"
 #include "wa_message.h"
@@ -65,7 +67,10 @@ public slots:
 
     // Text send. Device bundles are fetched with <iq xmlns=encrypt> the first
     // time, then cached; the message is Signal-encrypted per device and sent
-    // as a <message> stanza. Failures are reported through sendResult().
+    // as a <message> stanza. Group jids take the sender-key (skmsg) path:
+    // group metadata is fetched first, the body encrypted once, and the
+    // sender-key distribution message fanned out to devices that lack it.
+    // Failures are reported through sendResult().
     void sendText(const QString &jid, const QString &text);
 
 signals:
@@ -126,12 +131,19 @@ private:
 
     // ── Signal / message plumbing ────────────────────────────────────────
     class CredsStore;                       // wa::signal::Store over creds.json
+    class SenderKeysStore;                  // wa::signal::SenderKeyStore (groups)
 
     void ensurePreKeys(int count);          // generate one-time pre-keys
     void uploadPreKeys();                   // <iq type=set xmlns=encrypt>
     void finishSend(const QString &iqId, const wa::BinaryNode &iqNode);
     void sendWithBundles(const PendingSend &pending,
                          std::vector<wa::messaging::DeviceBundle> devices);
+    void requestGroupMetadata(const PendingSend &pending);
+    void fetchGroupBundles(const PendingSend &pending,
+                           const wa::messaging::GroupInfo &info);
+    void sendGroupWithBundles(const PendingSend &pending,
+                              const wa::messaging::GroupInfo &info,
+                              std::vector<wa::messaging::DeviceBundle> devices);
     void sendReceipt(const wa::BinaryNode &node);
     void downloadHistory(const wa::waproto::HistorySyncNotification &note);
     Chat chatModelFor(const std::string &jid) const;
@@ -141,6 +153,7 @@ private:
         QString jid;
         QString text;
         QString msgId;
+        bool isGroup = false;
     };
     struct CachedBundles {
         qint64 fetchedAt = 0;
@@ -148,11 +161,19 @@ private:
     };
 
     std::unique_ptr<CredsStore> m_store;
+    std::unique_ptr<SenderKeysStore> m_senderKeys;
     QNetworkAccessManager *m_net = nullptr;
     QHash<QString, PendingSend> m_pendingSends;   // iq id -> queued message
     QHash<QString, CachedBundles> m_bundleCache;  // user jid -> device bundles
     QJsonArray m_preKeys;      // [{id, priv, pub}] one-time pre-keys
     QJsonObject m_sessions;    // address -> hex(signal::serializeRecord)
+    QJsonObject m_senderKeyJson;   // "<group>::<user>" -> serialized sender key
+    QHash<QString, wa::messaging::GroupInfo> m_groupCache;
+    QHash<QString, PendingSend> m_pendingGroupMeta;   // iq id -> queued group send
+    // group jid -> device jids that already hold our sender key (Baileys'
+    // sender-key-memory, which keeps the distribution fan-out small).
+    QHash<QString, QSet<QString> > m_senderKeyMemory;
+    QHash<QString, QString> m_senderKeyGroupNames;  // device jid -> group, for memory
     quint32 m_nextPreKeyId = 1;
     quint32 m_lastUploadedPreKeyId = 0;
     wa::history::SyncData m_history;

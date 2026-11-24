@@ -14,6 +14,8 @@
 #include <QUrl>
 #include <QDebug>
 
+#include <set>
+
 #include "aes_gcm.h"
 #include "ed25519.h"
 #include "media_crypto.h"
@@ -125,6 +127,31 @@ private:
 
 
 
+// ── Group sender keys (one chain per group + member) ───────────────────────
+//
+// Group bodies are encrypted once with a per-sender chain key; only the
+// distribution message is Signal-encrypted per device. The chains live in
+// creds.json next to the 1:1 session records so they survive a restart.
+class WhatsAppDirect::SenderKeysStore : public wa::signal::SenderKeyStore {
+public:
+    explicit SenderKeysStore(WhatsAppDirect *owner) : q(owner) {}
+
+    bool loadSenderKey(const std::string &name, wa::signal::SenderKeyState &out) override {
+        const QJsonValue v = q->m_senderKeyJson.value(QString::fromStdString(name));
+        if (!v.isString()) return false;
+        return wa::signal::deserializeSenderKeyState(v.toString().toStdString(), out);
+    }
+
+    void storeSenderKey(const std::string &name, const wa::signal::SenderKeyState &state) override {
+        q->m_senderKeyJson[QString::fromStdString(name)] =
+            QString::fromStdString(wa::signal::serializeSenderKeyState(state));
+        q->saveCredentials();
+    }
+
+private:
+    WhatsAppDirect *q;
+};
+
 WhatsAppDirect::WhatsAppDirect(QObject *parent) : QObject(parent) {
     m_keepAlive.setInterval(30000);   // keepAliveIntervalMs
     connect(&m_keepAlive, &QTimer::timeout, this, &WhatsAppDirect::sendKeepAlive);
@@ -152,6 +179,7 @@ WhatsAppDirect::WhatsAppDirect(QObject *parent) : QObject(parent) {
 
     m_net = new QNetworkAccessManager(this);
     m_store.reset(new CredsStore(this));
+    m_senderKeys.reset(new SenderKeysStore(this));
 
     m_credsPath = QDir::homePath() + "/.openknot-qt/creds.json";
 }
@@ -200,6 +228,7 @@ void WhatsAppDirect::generateNewCredentials() {
     m_hasMe = false;
     m_preKeys = QJsonArray();
     m_sessions = QJsonObject();
+    m_senderKeyJson = QJsonObject();
     m_nextPreKeyId = 1;
     m_preKeysUploaded = false;
     ensurePreKeys(30);   // INITIAL_PREKEY_COUNT
@@ -224,6 +253,7 @@ bool WhatsAppDirect::loadCredentials() {
     m_hasMe = !m_meJid.isEmpty();
     m_preKeys = o.value("preKeys").toArray();
     m_sessions = o.value("sessions").toObject();
+    m_senderKeyJson = o.value("senderKeys").toObject();
     m_nextPreKeyId = quint32(o.value("nextPreKeyId").toInt(1));
     m_lastUploadedPreKeyId = quint32(o.value("lastUploadedPreKeyId").toInt(0));
     m_preKeysUploaded = o.value("preKeysUploaded").toBool(false);
@@ -258,6 +288,7 @@ bool WhatsAppDirect::saveCredentials() {
     o["meJid"] = m_meJid;
     o["preKeys"] = m_preKeys;
     o["sessions"] = m_sessions;
+    o["senderKeys"] = m_senderKeyJson;
     o["nextPreKeyId"] = int(m_nextPreKeyId);
     o["lastUploadedPreKeyId"] = int(m_lastUploadedPreKeyId);
     o["preKeysUploaded"] = m_preKeysUploaded;
@@ -542,6 +573,27 @@ void WhatsAppDirect::handleNode(const BinaryNode &node) {
             finishSend(iqId, node);
             return;
         }
+        // Answers to our <iq xmlns=w:g2><query/></iq> group metadata requests.
+        if (m_pendingGroupMeta.contains(iqId) && (iqType == "result" || iqType == "error")) {
+            const PendingSend pending = m_pendingGroupMeta.take(iqId);
+            wa::messaging::GroupInfo info;
+            std::string error;
+            if (!wa::messaging::parseGroupMetadata(node, info, error)) {
+                emit sendResult(pending.msgId, false, QString::fromStdString(error));
+                DLOG(this, "group metadata failed for " + pending.jid + ": " +
+                               QString::fromStdString(error));
+                return;
+            }
+            if (info.subject.isEmpty())
+                info.subject = pending.jid.toStdString();
+            m_groupCache.insert(pending.jid, info);
+            Chat chat = chatModelFor(info.jid);
+            chat.name = QString::fromStdString(info.subject);
+            chat.isGroup = true;
+            emit chatUpdated(chat);
+            fetchGroupBundles(pending, info);
+            return;
+        }
         // <pair-device> arrives as an iq with type=set.
         if (const BinaryNode *pair = node.child("pair-device")) {
             handlePairDevice(*pair);
@@ -611,7 +663,8 @@ void WhatsAppDirect::handleEncryptedMessage(const BinaryNode &node) {
     wa::messaging::IncomingMessage msg;
     std::string error;
 
-    if (!wa::messaging::decryptMessageNode(*m_store, node, meJid, msg, error)) {
+    if (!wa::messaging::decryptMessageNode(*m_store, m_senderKeys.get(), node, meJid, msg,
+                                          error)) {
         // Baileys sends a retry receipt so the sender re-encrypts with a fresh
         // pre-key message; we log instead (see QT_PORT.md §6).
         DLOG(this, "undecryptable message " + QString::fromStdString(msg.id) + ": " +
@@ -776,16 +829,19 @@ void WhatsAppDirect::sendText(const QString &jid, const QString &text) {
         emit sendResult(QString(), false, "no chat selected");
         return;
     }
-    if (wa::isJidGroup(jid.toStdString())) {
-        // Group text needs sender-key distribution (skmsg) + group metadata;
-        // see QT_PORT.md §6. Fail loudly rather than sending a broken stanza.
-        emit sendResult(QString(), false,
-                        "group sending needs sender keys (not implemented yet)");
-        return;
-    }
-
     const QString msgId =
         QString::fromStdString(wa::messaging::generateMessageId());
+
+    if (wa::isJidGroup(jid.toStdString())) {
+        PendingSend pending{jid, text, msgId, true};
+        const auto cached = m_groupCache.constFind(jid);
+        if (cached != m_groupCache.constEnd() && !cached->participants.empty()) {
+            fetchGroupBundles(pending, *cached);
+        } else {
+            requestGroupMetadata(pending);
+        }
+        return;
+    }
 
     // Device bundles are cached for a few minutes (Baileys' USER_DEVICES TTL).
     const QString userJid = QString::fromStdString(
@@ -878,6 +934,90 @@ void WhatsAppDirect::uploadPreKeys() {
                    .arg(m_preKeys.size()));
 }
 
+void WhatsAppDirect::requestGroupMetadata(const PendingSend &pending) {
+    const QString iqId = QString::fromStdString(wa::messaging::generateMessageId());
+    m_pendingGroupMeta.insert(iqId, pending);
+    DLOG(this, "fetching group metadata for " + pending.jid);
+    sendNode(wa::messaging::buildGroupMetadataRequest(iqId.toStdString(),
+                                                      pending.jid.toStdString()));
+}
+
+void WhatsAppDirect::fetchGroupBundles(const PendingSend &pending,
+                                       const wa::messaging::GroupInfo &info) {
+    // One <iq xmlns=encrypt> for every participant plus ourselves (our other
+    // devices need the distribution message too, and our own session must be
+    // ready for the echo of our own group message).
+    std::vector<std::string> users;
+    users.push_back(m_meJid.toStdString());
+    for (const auto &p : info.participants) {
+        if (wa::sameUser(p, m_meJid.toStdString())) continue;
+        users.push_back(p);
+    }
+
+    const QString iqId = QString::fromStdString(wa::messaging::generateMessageId());
+    m_pendingSends.insert(iqId, pending);
+    DLOG(this, QString("fetching device bundles for %1 participant(s) of %2")
+                   .arg(int(users.size()))
+                   .arg(pending.jid));
+    sendNode(wa::messaging::buildKeyRequest(iqId.toStdString(), users));
+}
+
+void WhatsAppDirect::sendGroupWithBundles(const PendingSend &pending,
+                                          const wa::messaging::GroupInfo &info,
+                                          std::vector<wa::messaging::DeviceBundle> devices) {
+    Q_UNUSED(info)
+    // Drop this very device; the server echoes our own message back.
+    std::vector<wa::messaging::DeviceBundle> filtered;
+    for (const auto &d : devices) {
+        if (QString::fromStdString(d.jid) == m_meJid) continue;
+        filtered.push_back(d);
+    }
+    if (filtered.empty()) {
+        emit sendResult(pending.msgId, false,
+                        "no reachable devices in " + pending.jid);
+        return;
+    }
+
+    std::set<std::string> already;
+    const QSet<QString> memory = m_senderKeyMemory.value(pending.jid);
+    for (const QString &d : memory) already.insert(d.toStdString());
+
+    wa::messaging::GroupSendPlan plan;
+    std::string error;
+    if (!wa::messaging::buildGroupTextStanza(*m_store, *m_senderKeys, m_meJid.toStdString(),
+                                            pending.jid.toStdString(),
+                                            pending.text.toStdString(),
+                                            pending.msgId.toStdString(), filtered, already,
+                                            plan, error)) {
+        emit sendResult(pending.msgId, false, QString::fromStdString(error));
+        DLOG(this, "group encrypt failed for " + pending.jid + ": " +
+                       QString::fromStdString(error));
+        return;
+    }
+
+    sendNode(plan.stanza);
+    QSet<QString> updated = memory;
+    for (const auto &jid : plan.distributedTo)
+        updated.insert(QString::fromStdString(jid));
+    m_senderKeyMemory.insert(pending.jid, updated);
+
+    DLOG(this, QString("sent group %1 to %2 (%3 device bundle(s), %4 distribution message(s))")
+                   .arg(pending.msgId)
+                   .arg(pending.jid)
+                   .arg(int(filtered.size()))
+                   .arg(int(plan.distributedTo.size())));
+    emit sendResult(pending.msgId, true, QString());
+
+    Message echo;
+    echo.id = pending.msgId;
+    echo.chatJid = pending.jid;
+    echo.fromMe = true;
+    echo.text = pending.text;
+    echo.timestamp = QDateTime::currentMSecsSinceEpoch();
+    echo.status = "sent";
+    emit messageAdded(echo);
+}
+
 void WhatsAppDirect::finishSend(const QString &iqId, const wa::BinaryNode &iqNode) {
     if (!m_pendingSends.contains(iqId)) return;
     const PendingSend pending = m_pendingSends.take(iqId);
@@ -891,6 +1031,12 @@ void WhatsAppDirect::finishSend(const QString &iqId, const wa::BinaryNode &iqNod
         emit sendResult(pending.msgId, false, QString::fromStdString(error));
         DLOG(this, "key fetch failed for " + pending.jid + ": " +
                        QString::fromStdString(error));
+        return;
+    } else if (pending.isGroup) {
+        // Group bundles are cached per participant jid; the message is
+        // encrypted once, so the participant list (not the cache) drives it.
+        wa::messaging::GroupInfo info = m_groupCache.value(pending.jid);
+        sendGroupWithBundles(pending, info, devices);
         return;
     } else {
         // Never encrypt to this very device; the server echoes to others.

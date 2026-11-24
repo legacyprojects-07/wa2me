@@ -20,6 +20,7 @@
 #include "binary_node.h"
 #include "ed25519.h"
 #include "message_test_store.h"
+#include "sender_key.h"
 #include "wa_message.h"
 
 #include <cstdio>
@@ -56,6 +57,196 @@ static std::string readFile(const std::string &path) {
     std::ostringstream ss;
     ss << in.rdbuf();
     return ss.str();
+}
+
+// In-memory group sender-key store (the Qt client backs this with creds.json).
+class MemSenderKeys : public signal::SenderKeyStore {
+public:
+    bool loadSenderKey(const std::string &name, signal::SenderKeyState &out) override {
+        auto it = states.find(name);
+        if (it == states.end()) return false;
+        out = it->second;
+        return true;
+    }
+    void storeSenderKey(const std::string &name, const signal::SenderKeyState &state) override {
+        states[name] = state;
+    }
+    std::map<std::string, signal::SenderKeyState> states;
+};
+
+static const std::string kGroupJid = "120363041234567890@g.us";
+static const std::string kPeerJid = "5511@s.whatsapp.net";
+
+// A plausible peer bundle: real Curve25519/XEdDSA keys, no private halves.
+static messaging::DeviceBundle fakeBundle(const std::string &jid) {
+    messaging::DeviceBundle d;
+    d.jid = jid;
+    const signal::KeyPair identity = signal::generateKeyPair();
+    const signal::KeyPair signedPreKey = signal::generateKeyPair();
+    const signal::KeyPair preKey = signal::generateKeyPair();
+    d.bundle.identityKey = identity.pub;
+    d.bundle.registrationId = 77;
+    d.bundle.signedPreKey.id = 5;
+    d.bundle.signedPreKey.pair.pub = signedPreKey.pub;
+    d.bundle.signedPreKey.signature = crypto::xeddsaSign(identity.priv, signedPreKey.pub);
+    d.bundle.preKey.id = 9;
+    d.bundle.preKey.pair.pub = preKey.pub;
+    d.bundle.hasPreKey = true;
+    return d;
+}
+
+// Group send/receive: stanza shape, distribution fan-out, skmsg round trip.
+static void runGroupChecks(signal::Store &store) {
+    std::string error;
+    MemSenderKeys mine;
+
+    const std::vector<messaging::DeviceBundle> bundles{
+        fakeBundle("5511:0@s.whatsapp.net"), fakeBundle("5522:0@s.whatsapp.net"),
+        fakeBundle(kMeJid)};
+
+    messaging::GroupSendPlan plan;
+    check(messaging::buildGroupTextStanza(store, mine, kMeJid, kGroupJid, "hi group",
+                                          "GROUPID1", bundles, {}, plan, error),
+          "build group stanza", error);
+    check(plan.stanza.tag == "message", "group stanza tag");
+    check(plan.stanza.attrOr("to") == kGroupJid, "group stanza recipient");
+    check(plan.stanza.attrOr("type") == "text", "group stanza type");
+
+    const BinaryNode *body = plan.stanza.child("enc");
+    check(body != nullptr, "group body enc node");
+    if (body) {
+        check(body->attrOr("type") == "skmsg", "group body is an skmsg", body->attrOr("type"));
+        check(body->bytes.size() > 40, "skmsg carries protobuf + signature");
+    }
+
+    const BinaryNode *participants = plan.stanza.child("participants");
+    check(participants != nullptr, "distribution participants node");
+    check(participants && participants->childrenNamed("to").size() == 3,
+          "distribution sent to every device including our own");
+    check(plan.distributedTo.size() == 3, "distributedTo lists the devices");
+    check(!plan.distribution.empty(), "distribution message serialized");
+
+    // Every <to> must carry a Signal-encrypted sender-key distribution message.
+    if (participants) {
+        for (const BinaryNode *to : participants->childrenNamed("to")) {
+            const BinaryNode *enc = to->child("enc");
+            check(enc != nullptr && enc->attrOr("type") == "pkmsg",
+                  "distribution wrapped in a Signal message");
+        }
+    }
+
+    // Second send: devices in the sender-key memory are skipped, our own
+    // devices always get the (idempotent) distribution message.
+    std::set<std::string> already{plan.distributedTo[0], plan.distributedTo[1]};
+    messaging::GroupSendPlan plan2;
+    check(messaging::buildGroupTextStanza(store, mine, kMeJid, kGroupJid, "again", "GROUPID2",
+                                          bundles, already, plan2, error),
+          "build second group stanza", error);
+    const BinaryNode *participants2 = plan2.stanza.child("participants");
+    check(participants2 && participants2->childrenNamed("to").size() == 1,
+          "sender-key memory suppresses repeat distributions");
+
+    // The wire format must survive our own encoder.
+    const Bytes wire = binary::encode(plan.stanza);
+    check(binary::decode(wire).ok, "group stanza re-decodes");
+
+    // Decoding a Message that carries a distribution message round-trips.
+    {
+        waproto::Message distMessage;
+        distMessage.hasSenderKeyDistribution = true;
+        distMessage.senderKeyDistribution.groupId = kGroupJid;
+        distMessage.senderKeyDistribution.axolotl = plan.distribution;
+        const Bytes encoded = waproto::encodeMessage(distMessage);
+        waproto::Message parsed;
+        check(waproto::decodeMessage(encoded, parsed), "distribution message encodes");
+        check(parsed.hasSenderKeyDistribution, "distribution flag survives");
+        check(parsed.senderKeyDistribution.groupId == kGroupJid, "group id survives");
+        check(parsed.senderKeyDistribution.axolotl == plan.distribution, "skdm bytes survive");
+    }
+
+    // ── Inbound: another member's sender key + skmsg body ────────────────
+    MemSenderKeys peer;
+    signal::SenderKeyDistribution peerDist;
+    check(signal::createSenderKey(peer, kGroupJid, kPeerJid, peerDist, error),
+          "peer creates a sender key", error);
+
+    MemSenderKeys ours;
+    check(signal::processDistribution(ours, kGroupJid, kPeerJid, peerDist, error),
+          "we install the peer distribution", error);
+
+    waproto::Message peerMessage;
+    peerMessage.conversation = "hello from the group";
+    Bytes skmsg;
+    check(signal::encryptGroup(peer, kGroupJid, kPeerJid,
+                               waproto::padMessage(waproto::encodeMessage(peerMessage)), skmsg,
+                               error),
+          "peer encrypts a group message", error);
+
+    BinaryNode inbound("message");
+    inbound.setAttr("from", kGroupJid);
+    inbound.setAttr("participant", kPeerJid);
+    inbound.setAttr("id", "GRPIN1");
+    inbound.setAttr("t", "1700000000");
+    BinaryNode enc("enc");
+    enc.setAttr("type", "skmsg");
+    enc.setAttr("v", "2");
+    enc.setBytes(skmsg);
+    inbound.addChild(enc);
+
+    const binary::DecodeResult onWire = binary::decode(binary::encode(inbound));
+    check(onWire.ok, "inbound group stanza re-decodes", onWire.error);
+
+    messaging::IncomingMessage incoming;
+    check(messaging::decryptMessageNode(store, &ours, onWire.node, kMeJid, incoming, error),
+          "decrypt inbound group message", error);
+    check(incoming.text == "hello from the group", "group text decrypted", incoming.text);
+    check(incoming.isGroup, "routed as a group message");
+    check(incoming.chatJid == kGroupJid, "chat is the group", incoming.chatJid);
+    check(incoming.senderJid == kPeerJid, "sender is the participant", incoming.senderJid);
+    check(!incoming.fromMe, "not from us");
+
+    // Same stanza without a sender-key store must fail cleanly, not crash.
+    messaging::IncomingMessage noStore;
+    const bool withoutStore =
+        messaging::decryptMessageNode(store, onWire.node, kMeJid, noStore, error);
+    check(!withoutStore, "skmsg without a sender-key store is rejected", error);
+
+    // Group metadata request/response.
+    const BinaryNode iq = messaging::buildGroupMetadataRequest("IQ1", kGroupJid);
+    check(iq.attrOr("xmlns") == "w:g2", "metadata iq namespace");
+    check(iq.attrOr("type") == "get", "metadata iq type");
+    check(iq.attrOr("to") == kGroupJid, "metadata iq target");
+    check(iq.child("query") != nullptr, "metadata iq has <query/>");
+
+    BinaryNode result("iq");
+    result.setAttr("type", "result");
+    BinaryNode group("group");
+    group.setAttr("id", kGroupJid);
+    group.setAttr("subject", "Qt test group");
+    group.setAttr("addressing_mode", "pn");
+    for (const char *member : {kPeerJid.c_str(), "5522@s.whatsapp.net"}) {
+        BinaryNode p("participant");
+        p.setAttr("jid", member);
+        group.addChild(p);
+    }
+    result.addChild(group);
+
+    messaging::GroupInfo info;
+    check(messaging::parseGroupMetadata(result, info, error), "parse group metadata", error);
+    check(info.subject == "Qt test group", "group subject", info.subject);
+    check(info.participants.size() == 2, "participants parsed");
+    check(info.addressingMode == "pn", "addressing mode parsed");
+
+    // An error reply must be reported, not silently ignored.
+    BinaryNode failure("iq");
+    failure.setAttr("type", "error");
+    BinaryNode errNode("error");
+    errNode.setAttr("code", "403");
+    errNode.setAttr("text", "not-a-member");
+    failure.addChild(errNode);
+    messaging::GroupInfo failed;
+    check(!messaging::parseGroupMetadata(failure, failed, error), "group error reported");
+    check(error.find("not-a-member") != std::string::npos, "error text propagated", error);
 }
 
 static const BinaryNode *firstToNode(const BinaryNode &stanza) {
@@ -170,6 +361,8 @@ int main(int argc, char **argv) {
               "encrypt wrapped", error);
         check(wrapped.tag == "to" && wrapped.child("enc") != nullptr, "wrapped node shape");
         check(wrappedPreKey, "wrapped copy also uses the pre-key message");
+
+        runGroupChecks(store);
 
         std::ofstream out(writeDir + "/cpp_message.txt");
         out << "CPPSTANZA " << toHex(wire) << "\n";

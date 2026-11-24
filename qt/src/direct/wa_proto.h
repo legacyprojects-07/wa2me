@@ -83,9 +83,18 @@ struct MessageKey {
     std::string participant;     // 4
 };
 
+// Message.senderKeyDistributionMessage (field 2): the group's jid plus the
+// serialized Signal sender-key distribution message (0x33 || proto).
+struct SenderKeyDistributionInfo {
+    std::string groupId;         // 1
+    Bytes axolotl;               // 2
+};
+
 // The parts of a Message the client renders.
 struct Message {
     std::string conversation;    // 1
+    bool hasSenderKeyDistribution = false;
+    SenderKeyDistributionInfo senderKeyDistribution;   // 2
     bool hasExtendedText = false;
     std::string extendedText;    // 6.text
     MediaInfo image;             // 3

@@ -184,6 +184,14 @@ std::string Message::mediaType() const {
 Bytes encodeMessage(const Message &m) {
     proto::Writer w;
     if (!m.conversation.empty()) w.fieldString(1, m.conversation);
+    if (m.hasSenderKeyDistribution) {
+        proto::Writer skd;
+        if (!m.senderKeyDistribution.groupId.empty())
+            skd.fieldString(1, m.senderKeyDistribution.groupId);
+        if (!m.senderKeyDistribution.axolotl.empty())
+            skd.fieldBytes(2, m.senderKeyDistribution.axolotl);
+        w.fieldMessage(2, skd.data());
+    }
     if (!m.image.url.empty() || !m.image.mediaKey.empty())
         w.fieldMessage(3, encodeMedia(m.image, 3));
     if (!m.document.url.empty() || !m.document.mediaKey.empty())
@@ -224,6 +232,18 @@ bool decodeMessage(const Bytes &data, Message &out) {
         case 1:
             out.conversation.assign(f.bytes.begin(), f.bytes.end());
             break;
+        case 2: {
+            out.hasSenderKeyDistribution = true;
+            proto::Reader skd(f.bytes);
+            proto::Field g;
+            while (skd.next(g)) {
+                if (g.number == 1)
+                    out.senderKeyDistribution.groupId.assign(g.bytes.begin(), g.bytes.end());
+                else if (g.number == 2)
+                    out.senderKeyDistribution.axolotl = g.bytes;
+            }
+            break;
+        }
         case 3: decodeMedia(f.bytes, 3, out.image); break;
         case 6: {
             proto::Reader ext(f.bytes);
