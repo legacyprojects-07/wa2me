@@ -1,9 +1,11 @@
 # Building `openknot-qt` as a Symbian `.sis`
 
-Short version: `qmake -spec symbian-gcce qt/openknot.pro && make release-gcce && make sis`.
-Read the **blockers** section first — as of today the sources need GCC ≥ 4.7 and
-the Symbian toolchain is GCC 4.6.3, so the first build will fail unless the
-C++11 features listed below are removed first.
+Qt Creator: open **`qt/openknot.pro`**, pick the *Symbian Device* kit,
+**Build ▸ Deploy**. Command line: `qmake -spec symbian-gcce openknot.pro &&
+make release-gcce && make sis`.
+
+The sources build with the Symbian GCGE (**GCC 4.6.3**) — see §6 — and only need
+the `qt/` folder; §2.1 shows the layout and where each file belongs.
 
 ## 1. What you need
 
@@ -18,7 +20,79 @@ C++11 features listed below are removed first.
 The app only needs `QtCore`, `QtGui` (widgets live in QtGui in Qt 4) and
 `QtNetwork` — no Qt Quick, no QtSql, no QtMobility.
 
-## 2. Build from the command line
+## 2. Working in Qt Creator (recommended)
+
+Qt Creator only needs **the `qt/` folder** — the Node backend, the docs and
+`qt/tests/` are not part of the device build. Copy the whole checkout if you
+like, but open `qt/openknot.pro` and nothing else.
+
+### 2.1 Where to put the files
+
+Use a **short path without spaces** on the Windows host, e.g.
+`C:\dev\openknot\qt`. Symbian's SBSv2 build system breaks on spaces in
+paths and on very long paths, and Qt Creator's shadow build directory appends
+another 40+ characters to whatever you choose.
+
+```
+C:\dev\openknot\
+└── qt\                        <- open THIS in Qt Creator (qt\openknot.pro)
+    ├── openknot.pro            the only project file; paths in it are relative
+    ├── SYMBIAN.md              this guide
+    ├── README.md
+    ├── CMakeLists.txt          desktop builds only - ignore for Symbian
+    ├── src\
+    │   ├── main.cpp
+    │   ├── models.h
+    │   ├── api_client.h/.cpp   proxy mode (REST client)
+    │   ├── mainwindow.h/.cpp   the UI
+    │   ├── qt4compat\          QJson*/WebSocket/SignalHook for Qt 4.7
+    │   └── direct\             the WhatsApp protocol (Qt-free core + glue)
+    └── tests\                  host-only tests - NOT in the .pro, never built
+                                for the device
+```
+
+Rules that matter:
+
+* **Do not flatten** `src/`, `src/direct/` and `src/qt4compat/` into one
+  folder. `INCLUDEPATH += src src/direct src/qt4compat` and includes such as
+  `#include "direct/whatsapp_direct.h"` are relative to that layout.
+* **Do not add `tests/` to the project.** Those are plain host programs
+  (`g++` + Node scripts), not Qt targets; adding them to `SOURCES` makes the
+  Symbian build fail. They are not listed in `openknot.pro` for that reason.
+* Keep `openknot.pro` next to `src/`; every path inside it is relative, so the
+  folder can be moved or copied freely as a unit.
+* Build **out of source** (Qt Creator's default: *shadow build* ticked). The
+  generated `.pkg`/`.sis` land in that shadow directory, not in `qt/`.
+
+### 2.2 Kit setup
+
+1. *Tools ▸ Options ▸ Build & Run ▸ Qt Versions* — **Add…** the Symbian Qt
+   4.7.4 `qmake.exe` from the Qt SDK (`…\QtSDK\Symbian\SDK\4.7.4\…`).
+2. *Kits* — the SDK normally pre-creates **Symbian Device**; check it uses the
+   GCGE 4.6.3 compiler, *Qt 4.7.4 for Symbian*, and the **CODA** device
+   connection (PC Suite mode, USB).
+3. *Projects ▸ Build* — set the build configuration to **Release**, keep
+   *Shadow build directory* ticked, and confirm the C++ flag shows
+   `-std=c++0x` (from the `.pro`).
+4. *Projects ▸ Run* — arguments, for example:
+   * direct mode: `--direct --creds E:/openknot/creds.json`
+   * proxy mode: `--url http://192.168.1.10:3000 --key YOUR_API_KEY`
+5. **Build ▸ Deploy** (or right-click the project ▸ *Deploy*) builds the
+   `sis` and installs it. The same step exists as a *Deploy configuration* in
+   the Projects pane.
+
+### 2.3 Where the app writes at runtime (on the phone)
+
+| What | Default | Recommended (pass as an argument) |
+|---|---|---|
+| device credentials (`creds.json`) | `~/.openknot-qt/creds.json` → `C:/Data/…` | `--creds E:/openknot/creds.json` (mass memory, survives a hard reset of C:) |
+| downloaded media (`File ▸ Save media`) | you pick the path each time | `E:/openknot/media/` |
+| files you send | any readable path | watch out: `C:/Data` needs `ReadUserData`, which the package has |
+
+The package already requests `NetworkServices ReadUserData WriteUserData`, so
+`E:/openknot/` works without a developer certificate.
+
+## 3. Build from the command line
 
 From the Qt SDK's *Symbian Qt 4.7.4* command prompt (it sets `EPOCROOT`,
 `SBS_HOME`, `QTDIR`):
@@ -39,7 +113,7 @@ Shadow builds put the artifacts under
 `openknot-qt_template.pkg` (the generated package definition) and
 `openknot-qt.sis`.
 
-## 3. Signing and installation
+## 4. Signing and installation
 
 `make signedsis` signs with `selfsignedcert.cer` / `selfsignedkey.pem`, which
 qmake generates with `makekeys` if you do not provide your own:
@@ -67,7 +141,7 @@ On the phone:
 If you only want proxy mode you still install the same package — the mode is a
 runtime switch (`--direct` or *Connection ▸ Direct WhatsApp Web mode*).
 
-## 4. Runtime notes
+## 5. Runtime notes
 
 * Credentials live next to the app data; on Symbian default to the mass memory:
   `openknot-qt --direct --creds E:/openknot/creds.json`.
@@ -80,7 +154,7 @@ runtime switch (`--direct` or *Connection ▸ Direct WhatsApp Web mode*).
   soft-key/QMenuBar layout are unverified. The window is plain Qt widgets and
   `QSplitter`-based, so it should scale, but expect cosmetic work.
 
-## 5. Blockers you will hit (honest list)
+## 6. Blockers you will hit (honest list)
 
 1. ~~C++11 completeness.~~ **Done.** GCGE is 4.6.3, which lacks non-static
    data member initialisers, `override`, `std::to_string`/`stoi`/`stoull` and
@@ -100,7 +174,7 @@ runtime switch (`--direct` or *Connection ▸ Direct WhatsApp Web mode*).
 2. **OpenSSL in the Qt build.** Nokia's *Qt 4.7.4 for Symbian* ships with SSL
    enabled; a self-built Qt without `-openssl` gives you a device that can run
    proxy mode but never finishes a direct-mode handshake. Check the log line
-   from §4 before debugging anything else.
+   from §5 before debugging anything else.
 
 3. **Qt version on the device.** Belle has Qt 4.7.4 in ROM, Anna 4.7.3, plain
    Symbian^3 only 4.6.3 — on the last one you need Nokia Smart Installer (or
