@@ -44,11 +44,11 @@ std::string userPart(const std::string &jid) {
     return decoded.valid ? decoded.user : jid;
 }
 
+} // namespace
+
 bool sameUser(const std::string &a, const std::string &b) {
     return !a.empty() && !b.empty() && userPart(a) == userPart(b);
 }
-
-} // namespace
 
 // ── Pre-key bundles ───────────────────────────────────────────────────────
 

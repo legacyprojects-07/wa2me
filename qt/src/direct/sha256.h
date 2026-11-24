@@ -24,6 +24,10 @@ Bytes sha256(const uint8_t *data, size_t len);
 Bytes sha256(const Bytes &data);
 Bytes sha256(const std::string &data);
 
+// SHA-1 is only needed for the WebSocket handshake (RFC 6455 accept key).
+Bytes sha1(const Bytes &data);
+Bytes sha1(const std::string &data);
+
 Bytes hmacSha256(const Bytes &key, const Bytes &data);
 
 // HKDF-SHA256 (RFC 5869): extract with `salt`, expand with `info`.

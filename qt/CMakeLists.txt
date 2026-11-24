@@ -1,23 +1,42 @@
 cmake_minimum_required(VERSION 3.16)
 project(openknot-qt VERSION 1.0.0 LANGUAGES CXX)
 
-set(CMAKE_CXX_STANDARD 17)
+# The protocol core is C++11-clean on purpose (Symbian ships GCC 4.x); desktop
+# builds use 17 unless the toolchain file says otherwise.
+if(NOT DEFINED CMAKE_CXX_STANDARD)
+  set(CMAKE_CXX_STANDARD 17)
+endif()
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
 set(CMAKE_AUTOMOC ON)
 set(CMAKE_AUTOUIC ON)
 set(CMAKE_AUTORCC ON)
 
-# Qt5/Qt6: Widgets (UI), Network (HTTP proxy mode + media CDN),
-# WebSockets (direct mode), Sql (local store for direct mode).
-find_package(Qt6 QUIET COMPONENTS Widgets Network WebSockets Sql)
-if(NOT Qt6_FOUND)
-  find_package(Qt5 REQUIRED COMPONENTS Widgets Network WebSockets Sql)
+# Qt 4.7.4 is the target (Symbian): Widgets + Network only. Direct mode speaks
+# RFC 6455 over QSslSocket itself (src/qt4compat/websocket.cpp) because
+# QWebSocket only exists from Qt 5.3, and the QJson* classes from Qt 5.0 are
+# replaced by src/qt4compat/json.cpp. Qt 5/6 still build (the shims are
+# compiled out by QT_VERSION checks there).
+find_package(Qt4 QUIET COMPONENTS QtCore QtGui QtNetwork)
+if(Qt4_FOUND)
+  set(QT_USE_QTGUI TRUE)
+  include(${QT_USE_FILE})
+  set(QT_LIBS ${QT_LIBRARIES})
+  set(QT4_BUILD TRUE)
+else()
+  find_package(Qt6 QUIET COMPONENTS Widgets Network)
+  if(NOT Qt6_FOUND)
+    find_package(Qt5 REQUIRED COMPONENTS Widgets Network)
+  endif()
 endif()
 
 add_executable(openknot-qt
   src/main.cpp
   src/api_client.cpp
   src/mainwindow.cpp
+  # Qt 4.7 compatibility layer (QJson*, functor hooks, WebSocket transport)
+  src/qt4compat/json.cpp
+  src/qt4compat/qt4compat.cpp
+  src/qt4compat/websocket.cpp
   # direct mode: transport stack (Qt-free internals + QWebSocket glue)
   src/direct/whatsapp_direct.cpp
   src/direct/binary_node.cpp
@@ -38,24 +57,31 @@ add_executable(openknot-qt
   src/direct/media_upload.cpp
 )
 
-target_include_directories(openknot-qt PRIVATE src src/direct)
+target_include_directories(openknot-qt PRIVATE src src/direct src/qt4compat)
 
-if(Qt6_FOUND)
-  target_link_libraries(openknot-qt PRIVATE
-    Qt6::Widgets Qt6::Network Qt6::WebSockets Qt6::Sql)
+if(QT4_BUILD)
+  # Qt 4 needs the network modules spelled out; no WebSockets (5.3+).
+  target_link_libraries(openknot-qt PRIVATE ${QT_LIBS})
+elseif(Qt6_FOUND)
+  target_link_libraries(openknot-qt PRIVATE Qt6::Widgets Qt6::Network)
 else()
-  target_link_libraries(openknot-qt PRIVATE
-    Qt5::Widgets Qt5::Network Qt5::WebSockets Qt5::Sql)
+  target_link_libraries(openknot-qt PRIVATE Qt5::Widgets Qt5::Network)
 endif()
 
 # The direct-mode stack is dependency-free on purpose: Noise, X25519,
 # AES-256-GCM, HKDF, raw DEFLATE, Ed25519/XEdDSA, the Signal double ratchet,
-# the WAProto subset and WhatsApp media crypto are all implemented in
-# src/direct/, so the app needs no libsodium/zlib/protobuf/libsignal.
+# group sender keys, the WAProto subset and WhatsApp media crypto are all
+# implemented in src/direct/, so the app needs no libsodium/zlib/protobuf/
+# libsignal.
 #
-# Qt 4.7 (Symbian) note: QWebSocket does not exist before Qt 5.4, so direct
-# mode needs the QTcpSocket transport described in QT_PORT.md §5. Proxy mode
-# (api_client.cpp) only needs QtNetwork + a JSON parser.
+# Qt 4.7 (Symbian): everything the client uses from Qt is 4.7.4 API.
+#   * QWebSocket (Qt 5.3)   -> src/qt4compat/websocket.cpp (RFC 6455 on QSslSocket)
+#   * QJson*     (Qt 5.0)   -> src/qt4compat/json.{h,cpp}
+#   * functor connects (Qt 5) -> SignalHook in src/qt4compat/qt4compat.h
+#   * QHttpMultiPart (Qt 4.8), QUrlQuery/QCommandLineParser (Qt 5)
+#       -> hand-built multipart body, QUrl::addQueryItem, argv parsing
+# qt/tests/qt4_check.sh compiles every Qt source against the real 4.7.4
+# headers (it fetches the qt/qt 4.7 branch and builds an include tree).
 
 # ── Core test suites (host g++, no Qt required) ────────────────────────────
 # These validate the ported protocol code against vectors generated from the

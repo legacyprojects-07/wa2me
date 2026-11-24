@@ -26,41 +26,53 @@
 #include <QDialog>
 #include <QDialogButtonBox>
 #include <QCheckBox>
-#include <QJsonObject>
 
-#include "api_client.h"
+#include "api_client.h"          // also brings in the QJson* shim + Qt4 helpers
 #include "direct/whatsapp_direct.h"
 
 MainWindow::MainWindow(QWidget *parent) : QMainWindow(parent) {
     m_api = new ApiClient(this);
     m_direct = new WhatsAppDirect(this);
 
-    connect(m_api, &ApiClient::chatsReady, this, &MainWindow::onChatsReady);
-    connect(m_api, &ApiClient::messagesReady, this, &MainWindow::onMessagesReady);
-    connect(m_api, &ApiClient::sendDone, this, &MainWindow::onSendDone);
-    connect(m_api, &ApiClient::qrReady, this, &MainWindow::onQrReady);
-    connect(m_api, &ApiClient::syncReady, this, &MainWindow::onSyncReady);
-    connect(m_api, &ApiClient::errorOccurred, this, &MainWindow::onError);
+    connect(m_api, SIGNAL(chatsReady(QList<Chat>)), this, SLOT(onChatsReady(QList<Chat>)));
+    connect(m_api, SIGNAL(messagesReady(QString,QList<Message>)), this,
+            SLOT(onMessagesReady(QString,QList<Message>)));
+    connect(m_api, SIGNAL(sendDone(QJsonObject)), this, SLOT(onSendDone(QJsonObject)));
+    connect(m_api, SIGNAL(qrReady(QString,QString)), this,
+            SLOT(onQrReady(QString,QString)));
+    connect(m_api, SIGNAL(syncReady(qint64,bool,QList<Chat>,QList<Message>)), this,
+            SLOT(onSyncReady(qint64,bool,QList<Chat>,QList<Message>)));
+    connect(m_api, SIGNAL(errorOccurred(QString,QString,int)), this,
+            SLOT(onError(QString,QString,int)));
+    connect(m_api, SIGNAL(mediaReady(QString,QString,QByteArray,QString)), this,
+            SLOT(onMediaReady(QString,QString,QByteArray,QString)));
 
-    connect(m_direct, &WhatsAppDirect::connectionUpdate, this, &MainWindow::onDirectConnection);
-    connect(m_direct, &WhatsAppDirect::qrCode, this, &MainWindow::onDirectQr);
-    connect(m_direct, &WhatsAppDirect::paired, this, &MainWindow::onDirectPaired);
-    connect(m_direct, &WhatsAppDirect::logLine, this, &MainWindow::onDirectLog);
-    connect(m_direct, &WhatsAppDirect::streamError, this,
-            [this](const QString &code, const QString &text) {
-                appendLog(QString("[direct] stream error %1: %2").arg(code, text));
-            });
-    connect(m_direct, &WhatsAppDirect::sendResult, this,
-            [this](const QString &id, bool ok, const QString &error) {
-                if (!ok) appendLog(QString("[direct] send %1 failed: %2").arg(id, error));
-            });
-    connect(m_direct, &WhatsAppDirect::chatUpdated, this, &MainWindow::onDirectChat);
-    connect(m_direct, &WhatsAppDirect::messageAdded, this, &MainWindow::onDirectMessage);
-    connect(m_direct, &WhatsAppDirect::historySyncReceived, this,
-            [this](int progress, int chats, int messages) {
-                statusBar()->showMessage(QString("History sync %1% — %2 chats, %3 messages")
-                                             .arg(progress).arg(chats).arg(messages), 4000);
-            });
+    connect(m_direct, SIGNAL(connectionUpdate(QString,QString)), this,
+            SLOT(onDirectConnection(QString,QString)));
+    connect(m_direct, SIGNAL(qrCode(QString)), this, SLOT(onDirectQr(QString)));
+    connect(m_direct, SIGNAL(paired(QString)), this, SLOT(onDirectPaired(QString)));
+    connect(m_direct, SIGNAL(logLine(QString)), this, SLOT(onDirectLog(QString)));
+    SignalHook::attach(m_direct, SIGNAL(streamError(QString,QString)),
+                       [this](const QString &code, const QString &text) {
+                           appendLog(QString("[direct] stream error %1: %2").arg(code, text));
+                       }, false);
+    SignalHook::attach(m_direct, SIGNAL(sendResult(QString,bool,QString)),
+                       [this](const QString &id, bool ok, const QString &error) {
+                           if (!ok)
+                               appendLog(QString("[direct] send %1 failed: %2").arg(id, error));
+                       }, false);
+    connect(m_direct, SIGNAL(chatUpdated(Chat)), this, SLOT(onDirectChat(Chat)));
+    connect(m_direct, SIGNAL(messageAdded(Message)), this, SLOT(onDirectMessage(Message)));
+    connect(m_direct, SIGNAL(mediaSaved(QString,QString,QString)), this,
+            SLOT(onDirectMediaSaved(QString,QString,QString)));
+    connect(m_direct, SIGNAL(mediaFailed(QString,QString,QString)), this,
+            SLOT(onDirectMediaFailed(QString,QString,QString)));
+    SignalHook::attach(m_direct, SIGNAL(historySyncReceived(int,int,int)),
+                       [this](int progress, int chats, int messages) {
+                           statusBar()->showMessage(
+                               QString("History sync %1% — %2 chats, %3 messages")
+                                   .arg(progress).arg(chats).arg(messages), 4000);
+                       }, false);
 
     buildUi();
     buildActions();
@@ -80,7 +92,7 @@ void MainWindow::buildUi() {
     m_chatList = new QListWidget(splitter);
     m_chatList->setMinimumWidth(240);
     m_chatList->setAlternatingRowColors(true);
-    connect(m_chatList, &QListWidget::itemSelectionChanged, this, &MainWindow::onChatSelected);
+    connect(m_chatList, SIGNAL(itemSelectionChanged()), this, SLOT(onChatSelected()));
 
     auto *right = new QWidget(splitter);
     auto *rightLayout = new QVBoxLayout(right);
@@ -93,12 +105,12 @@ void MainWindow::buildUi() {
     auto *inputRow = new QHBoxLayout;
     m_input = new QLineEdit(right);
     m_input->setPlaceholderText("Type a message…");
-    connect(m_input, &QLineEdit::returnPressed, this, &MainWindow::sendCurrentMessage);
+    connect(m_input, SIGNAL(returnPressed()), this, SLOT(sendCurrentMessage()));
     m_attachBtn = new QPushButton("Attach", right);
-    connect(m_attachBtn, &QPushButton::clicked, this, &MainWindow::attachFile);
+    connect(m_attachBtn, SIGNAL(clicked()), this, SLOT(attachFile()));
     m_sendBtn = new QPushButton("Send", right);
     m_sendBtn->setDefault(true);
-    connect(m_sendBtn, &QPushButton::clicked, this, &MainWindow::sendCurrentMessage);
+    connect(m_sendBtn, SIGNAL(clicked()), this, SLOT(sendCurrentMessage()));
     inputRow->addWidget(m_input, 1);
     inputRow->addWidget(m_attachBtn);
     inputRow->addWidget(m_sendBtn);
@@ -124,40 +136,71 @@ void MainWindow::buildUi() {
 }
 
 void MainWindow::buildActions() {
+    // QMenu::addAction(text, receiver, method) is Qt 5.6+, so actions are
+    // created first and connected the Qt 4 way.
     auto *fileMenu = menuBar()->addMenu("&File");
-    fileMenu->addAction("Refresh chats", this, &MainWindow::refreshChats, QKeySequence::Refresh);
-    fileMenu->addAction("Save attachments to…", this, &MainWindow::attachFile);
+
+    QAction *refresh = fileMenu->addAction("Refresh chats");
+    refresh->setShortcut(QKeySequence::Refresh);
+    connect(refresh, SIGNAL(triggered()), this, SLOT(refreshChats()));
+
+    QAction *attachAction = fileMenu->addAction("Send file…");
+    connect(attachAction, SIGNAL(triggered()), this, SLOT(attachFile()));
+
+    QAction *saveMediaAction = fileMenu->addAction("Save media from chat…");
+    connect(saveMediaAction, SIGNAL(triggered()), this, SLOT(saveMedia()));
+
     fileMenu->addSeparator();
-    fileMenu->addAction("Quit", qApp, &QApplication::quit, QKeySequence::Quit);
+    QAction *quit = fileMenu->addAction("Quit");
+    quit->setShortcut(QKeySequence::Quit);
+    connect(quit, SIGNAL(triggered()), qApp, SLOT(quit()));
 
     auto *connMenu = menuBar()->addMenu("&Connection");
-    connMenu->addAction("Show QR / pair device", this, &MainWindow::showQr);
+    QAction *showQrAction = connMenu->addAction("Show QR / pair device");
+    connect(showQrAction, SIGNAL(triggered()), this, SLOT(showQr()));
+
     m_directAction = connMenu->addAction("Direct WhatsApp Web mode");
     m_directAction->setCheckable(true);
-    connect(m_directAction, &QAction::toggled, this, &MainWindow::toggleDirectMode);
+    connect(m_directAction, SIGNAL(toggled(bool)), this, SLOT(toggleDirectMode(bool)));
+
     connMenu->addSeparator();
-    connMenu->addAction("Settings…", this, &MainWindow::openSettings);
+    QAction *settings = connMenu->addAction("Settings…");
+    connect(settings, SIGNAL(triggered()), this, SLOT(openSettings()));
 
     auto *tb = addToolBar("Main");
-    tb->addAction("Refresh", this, &MainWindow::refreshChats);
-    tb->addAction("QR", this, &MainWindow::showQr);
+    QAction *tbRefresh = tb->addAction("Refresh");
+    connect(tbRefresh, SIGNAL(triggered()), this, SLOT(refreshChats()));
+    QAction *tbQr = tb->addAction("QR");
+    connect(tbQr, SIGNAL(triggered()), this, SLOT(showQr()));
+    QAction *tbSave = tb->addAction("Save media");
+    connect(tbSave, SIGNAL(triggered()), this, SLOT(saveMedia()));
+
     tb->addSeparator();
     m_search = new QLineEdit(tb);
     m_search->setPlaceholderText("Search messages…");
     m_search->setMaximumWidth(240);
-    connect(m_search, &QLineEdit::returnPressed, this, &MainWindow::searchMessages);
+    connect(m_search, SIGNAL(returnPressed()), this, SLOT(searchMessages()));
     tb->addWidget(m_search);
-    tb->addAction("Log", this, [this]() { m_logDock->setVisible(!m_logDock->isVisible()); });
+
+    QAction *logAction = tb->addAction("Log");
+    connect(logAction, SIGNAL(triggered()), this, SLOT(toggleLogDock()));
 }
 
 void MainWindow::applyMode() {
-    const bool proxy = !m_directMode;
-    m_attachBtn->setEnabled(proxy);
+    // Media works in both modes: proxy mode posts to the backend, direct mode
+    // encrypts and uploads to the WhatsApp CDN.
+    m_attachBtn->setEnabled(true);
     m_statusLabel->setText(m_directMode ? QStringLiteral("Direct mode — WhatsApp Web")
                                         : QString("Proxy mode — %1").arg(m_baseUrl));
 }
 
+void MainWindow::setCredentialsPath(const QString &path) {
+    m_pendingCredsPath = path;
+    if (m_direct && !path.isEmpty()) m_direct->setCredentialsPath(path);
+}
+
 void MainWindow::start(const QString &baseUrl, const QString &apiKey, bool directMode) {
+    if (!m_pendingCredsPath.isEmpty()) m_direct->setCredentialsPath(m_pendingCredsPath);
     m_baseUrl = baseUrl;
     m_apiKey = apiKey;
     m_api->setBaseUrl(baseUrl);
@@ -174,7 +217,7 @@ void MainWindow::start(const QString &baseUrl, const QString &apiKey, bool direc
         // Delta polling: the J2ME-friendly /sync endpoint, every 5 seconds.
         auto *poll = new QTimer(this);
         poll->setInterval(5000);
-        connect(poll, &QTimer::timeout, this, &MainWindow::scheduleSyncPoll);
+        connect(poll, SIGNAL(timeout()), this, SLOT(scheduleSyncPoll()));
         poll->start();
     }
 }
@@ -264,29 +307,31 @@ void MainWindow::renderMessages() {
             "font-size:9pt;}"
             "</style>";
     for (const Message &m : messages) {
-        const QString ts = QDateTime::fromSecsSinceEpoch(m.timestamp)
+        const QString ts = QDateTime::fromTime_t(uint(m.timestamp))
                                .toString("dd MMM HH:mm");
         html += QString("<div class=\"m %1\">").arg(m.fromMe ? "me" : "");
         html += QString("<div class=\"bubble %1\">").arg(m.fromMe ? "meb" : "");
         if (!m.quoted.id.isEmpty()) {
             html += QString("<div class=\"quoted\">%1</div>")
-                        .arg(m.quoted.text.isEmpty() ? "[media]" : m.quoted.text.toHtmlEscaped());
+                        .arg(htmlEscaped(m.quoted.text.isEmpty() ? QString("[media]")
+                                                                 : m.quoted.text));
         }
         if (m.deleted) {
             html += "<i>This message was deleted</i>";
         } else if (m.hasMedia) {
             html += QString("[%1] %2").arg(m.mediaType.isEmpty() ? "media" : m.mediaType,
-                                           m.fileName.toHtmlEscaped());
-            if (!m.text.isEmpty()) html += "<br>" + m.text.toHtmlEscaped();
+                                           htmlEscaped(m.fileName));
+            if (!m.text.isEmpty()) html += "<br>" + htmlEscaped(m.text);
         } else {
-            html += m.text.toHtmlEscaped();
+            html += htmlEscaped(m.text);
         }
         if (m.edited) html += " <span class=\"meta\">(edited)</span>";
         html += "</div>";
         html += QString("<div class=\"meta\">%1%2%3</div>")
                     .arg(ts,
-                         m.senderName.isEmpty() ? QString() : " · " + m.senderName.toHtmlEscaped(),
-                         m.fromMe ? " · " + m.status : QString());
+                         m.senderName.isEmpty() ? QString()
+                                                : " · " + htmlEscaped(m.senderName),
+                         m.fromMe ? " · " + htmlEscaped(m.status) : QString());
         html += "</div>";
     }
     m_view->setHtml(html);
@@ -314,17 +359,13 @@ void MainWindow::sendCurrentMessage() {
     m.id = QString("local-%1").arg(QDateTime::currentMSecsSinceEpoch());
     m.fromMe = true;
     m.text = text;
-    m.timestamp = QDateTime::currentDateTime().toSecsSinceEpoch();
+    m.timestamp = qt_now_secs();
     m.status = "pending";
     m_messages[jid].append(m);
     renderMessages();
 }
 
 void MainWindow::attachFile() {
-    if (m_directMode) {
-        appendLog("[direct] media upload needs the CDN crypto layer (QT_PORT.md §2.6)");
-        return;
-    }
     const QString jid = currentJid();
     if (jid.isEmpty()) {
         QMessageBox::information(this, "No chat", "Select a chat first.");
@@ -332,9 +373,87 @@ void MainWindow::attachFile() {
     }
     const QString path = QFileDialog::getOpenFileName(this, "Send file");
     if (path.isEmpty()) return;
-    m_api->sendMedia(jid, path, QString(), m_input->text().trimmed());
+    const QString caption = m_input->text().trimmed();
+
+    if (m_directMode) {
+        // Direct mode encrypts + uploads to the WhatsApp CDN itself.
+        m_direct->sendMedia(jid, path, caption);
+    } else {
+        m_api->sendMedia(jid, path, QString(), caption);
+    }
     m_input->clear();
     statusBar()->showMessage("Uploading " + QFileInfo(path).fileName() + "…", 4000);
+}
+
+// Downloads the newest media message of the current chat.
+void MainWindow::saveMedia() {
+    const QString jid = currentJid();
+    if (jid.isEmpty()) {
+        QMessageBox::information(this, "No chat", "Select a chat first.");
+        return;
+    }
+    QString msgId;
+    const QList<Message> messages = m_messages.value(jid);
+    for (int i = messages.size() - 1; i >= 0; i--) {
+        if (!messages.at(i).hasMedia) continue;
+        msgId = messages.at(i).id;
+        break;
+    }
+    if (msgId.isEmpty()) {
+        QMessageBox::information(this, "No media",
+                                 "This chat has no media messages to download.");
+        return;
+    }
+
+    QString suggested = QDir::homePath() + "/" + "openknot-media";
+    const QString path = QFileDialog::getSaveFileName(this, "Save media", suggested);
+    if (path.isEmpty()) return;
+
+    m_pendingSavePath = path;
+    m_pendingSaveMsgId = msgId;
+    statusBar()->showMessage("Downloading media…", 4000);
+    if (m_directMode)
+        m_direct->downloadMedia(jid, msgId, path);
+    else
+        m_api->downloadMedia(jid, msgId);
+}
+
+void MainWindow::onMediaReady(const QString &jid, const QString &msgId,
+                              const QByteArray &bytes, const QString &mime) {
+    Q_UNUSED(jid)
+    Q_UNUSED(mime)
+    if (msgId != m_pendingSaveMsgId || m_pendingSavePath.isEmpty()) return;
+    QFile out(m_pendingSavePath);
+    if (!out.open(QIODevice::WriteOnly | QIODevice::Truncate)) {
+        m_pendingSavePath.clear();
+        m_pendingSaveMsgId.clear();
+        QMessageBox::warning(this, "Save failed", "Cannot write " + m_pendingSavePath);
+        return;
+    }
+    out.write(bytes);
+    out.close();
+    statusBar()->showMessage("Saved " + m_pendingSavePath, 4000);
+    m_pendingSavePath.clear();
+    m_pendingSaveMsgId.clear();
+}
+
+void MainWindow::onDirectMediaSaved(const QString &chatJid, const QString &msgId,
+                                    const QString &path) {
+    Q_UNUSED(chatJid)
+    Q_UNUSED(msgId)
+    statusBar()->showMessage("Saved " + path, 4000);
+    m_pendingSavePath.clear();
+    m_pendingSaveMsgId.clear();
+}
+
+void MainWindow::onDirectMediaFailed(const QString &chatJid, const QString &msgId,
+                                     const QString &error) {
+    Q_UNUSED(chatJid)
+    Q_UNUSED(msgId)
+    m_pendingSavePath.clear();
+    m_pendingSaveMsgId.clear();
+    statusBar()->showMessage("Media download failed: " + error, 6000);
+    appendLog("[direct] media download failed: " + error);
 }
 
 void MainWindow::onSendDone(const QJsonObject &obj) {
@@ -345,6 +464,22 @@ void MainWindow::onSendDone(const QJsonObject &obj) {
         m_messages.remove(currentJid());
         m_api->getMessages(currentJid(), 100);
     }
+}
+
+void MainWindow::toggleLogDock() {
+    if (m_logDock) m_logDock->setVisible(!m_logDock->isVisible());
+}
+
+void MainWindow::onQrDialogCode(const QString &qr) {
+    if (m_qrCodeView) m_qrCodeView->setPlainText(qr);
+}
+
+void MainWindow::onQrDialogCodeStatus(const QString &status, const QString &qr) {
+    if (!m_qrCodeView) return;
+    if (!status.isEmpty() && status != "connected")
+        m_qrCodeView->setPlainText(QString("status: %1\n%2").arg(status, qr));
+    else
+        m_qrCodeView->setPlainText(qr.isEmpty() ? QString("Already connected") : qr);
 }
 
 void MainWindow::searchMessages() {
@@ -385,29 +520,26 @@ void MainWindow::showQr() {
     code->setMinimumSize(420, 120);
     lay->addWidget(code);
 
-    auto *buttons = new QDialogButtonBox(QDialogButtonBox::Close, dlg);
-    connect(buttons, &QDialogButtonBox::rejected, dlg, &QDialog::reject);
+    auto *buttons = new QDialogButtonBox(QDialogButtonBox::Close, Qt::Horizontal, dlg);
+    connect(buttons, SIGNAL(rejected()), dlg, SLOT(reject()));
     lay->addWidget(buttons);
 
     if (m_directMode) {
-        connect(m_direct, &WhatsAppDirect::qrCode, code, [code](const QString &qr) {
-            // The raw pairing string. Rendering it as a QR image needs a QR
-            // encoder (QZXing / qrcodegen); the string itself is what the
-            // phone scans, so it is shown verbatim here.
-            code->setPlainText(qr);
-        });
+        // The raw pairing string. Rendering it as a QR image needs a QR
+        // encoder (QZXing / qrcodegen); the string itself is what the phone
+        // scans, so it is shown verbatim here.
+        m_qrCodeView = code;
+        connect(m_direct, SIGNAL(qrCode(QString)), this, SLOT(onQrDialogCode(QString)),
+                Qt::UniqueConnection);
         m_direct->requestPairingQr();
     } else {
-        connect(m_api, &ApiClient::qrReady, code, [code](const QString &status,
-                                                         const QString &qr) {
-            if (!status.isEmpty() && status != "connected")
-                code->setPlainText(QString("status: %1\n%2").arg(status, qr));
-            else
-                code->setPlainText(qr.isEmpty() ? "Already connected" : qr);
-        });
+        m_qrCodeView = code;
+        connect(m_api, SIGNAL(qrReady(QString,QString)), this,
+                SLOT(onQrDialogCodeStatus(QString,QString)), Qt::UniqueConnection);
         m_api->getQr();
     }
     dlg->exec();
+    m_qrCodeView = 0;
 }
 
 void MainWindow::onQrReady(const QString &status, const QString &qr) {
@@ -517,10 +649,11 @@ void MainWindow::openSettings() {
     form->addRow(direct);
     form->addRow("Credentials file", creds);
     form->addRow(fullSync);
-    auto *buttons = new QDialogButtonBox(QDialogButtonBox::Ok | QDialogButtonBox::Cancel, &dlg);
+    auto *buttons = new QDialogButtonBox(QDialogButtonBox::Ok | QDialogButtonBox::Cancel,
+                                              Qt::Horizontal, &dlg);
     form->addRow(buttons);
-    connect(buttons, &QDialogButtonBox::accepted, &dlg, &QDialog::accept);
-    connect(buttons, &QDialogButtonBox::rejected, &dlg, &QDialog::reject);
+    connect(buttons, SIGNAL(accepted()), &dlg, SLOT(accept()));
+    connect(buttons, SIGNAL(rejected()), &dlg, SLOT(reject()));
 
     if (dlg.exec() != QDialog::Accepted) return;
 

@@ -18,13 +18,13 @@
 //   TODO      : app state (mute/pin/archive), presence privacy.
 
 #include <QObject>
-#include <QWebSocket>
 #include <QTimer>
 #include <QByteArray>
 #include <QString>
-#include <QJsonObject>
-#include <QJsonArray>
-#include <QVariantMap>
+#include "qt4compat/json.h"
+#include "qt4compat/qt4compat.h"
+#include "qt4compat/websocket.h"
+#include <QVariant>
 #include <QHash>
 #include <QSet>
 
@@ -114,11 +114,30 @@ signals:
     void mediaProgress(const QString &msgId, const QString &stage);
     void logLine(const QString &line);
 
+    // Queued sends/uploads (declared before the methods that take them).
+    struct PendingSend {
+        QString jid;
+        QString text;
+        QString msgId;
+        bool isGroup = false;
+        // Media sends carry a fully assembled message (built after the upload
+        // completes) instead of `text`.
+        bool isMedia = false;
+        wa::waproto::Message payload;
+    };
+    // An upload in flight: the send waits until the CDN hands back a URL.
+    struct PendingUpload {
+        PendingSend send;
+        wa::media::Type type = wa::media::Type::Document;
+        wa::media::UploadedMedia uploaded;
+        wa::media::MediaMeta meta;
+    };
+
 private slots:
     void onConnected();
     void onDisconnected();
     void onBinaryMessage(const QByteArray &data);
-    void onSocketError(QAbstractSocket::SocketError error);
+    void onSocketError(const QString &reason);
     void sendKeepAlive();
 
 private:
@@ -174,23 +193,6 @@ private:
     Chat chatModelFor(const std::string &jid) const;
     Message messageModelFor(const wa::messaging::IncomingMessage &in) const;
 
-    struct PendingSend {
-        QString jid;
-        QString text;
-        QString msgId;
-        bool isGroup = false;
-        // Media sends carry a fully assembled message (built after the upload
-        // completes) instead of `text`.
-        bool isMedia = false;
-        wa::waproto::Message payload;
-    };
-    // An upload in flight: the send waits until the CDN hands back a URL.
-    struct PendingUpload {
-        PendingSend send;
-        wa::media::Type type = wa::media::Type::Document;
-        wa::media::UploadedMedia uploaded;
-        wa::media::MediaMeta meta;
-    };
     struct CachedBundles {
         qint64 fetchedAt = 0;
         std::vector<wa::messaging::DeviceBundle> devices;
@@ -220,7 +222,7 @@ private:
     wa::history::SyncData m_history;
     bool m_preKeysUploaded = false;
 
-    QWebSocket m_socket;
+    QtWsSocket m_socket;   // RFC 6455 over QSslSocket (QWebSocket is Qt 5.3+)
     std::unique_ptr<wa::noise::NoiseHandler> m_noise;
     QTimer m_keepAlive;
     QTimer m_reconnectTimer;

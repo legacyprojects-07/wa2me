@@ -16,6 +16,8 @@
 #include <QHash>
 
 #include "models.h"
+#include "qt4compat/json.h"
+#include "qt4compat/qt4compat.h"
 
 class QListWidget;
 class QListWidgetItem;
@@ -38,15 +40,22 @@ public:
 
     void start(const QString &baseUrl, const QString &apiKey, bool directMode);
 
+    // Where direct mode keeps the device credentials (creds.json equivalent).
+    void setCredentialsPath(const QString &path);
+
 private slots:
     void openSettings();
     void refreshChats();
     void onChatSelected();
     void sendCurrentMessage();
     void attachFile();
+    void saveMedia();
     void showQr();
     void toggleDirectMode(bool on);
     void searchMessages();
+    void onQrDialogCode(const QString &qr);
+    void onQrDialogCodeStatus(const QString &status, const QString &qr);
+    void toggleLogDock();
 
     // ApiClient
     void onChatsReady(const QList<Chat> &chats);
@@ -54,6 +63,12 @@ private slots:
     void onDirectMessage(const Message &message);
     void onMessagesReady(const QString &jid, const QList<Message> &messages);
     void onSendDone(const QJsonObject &obj);
+    void onMediaReady(const QString &jid, const QString &msgId,
+                      const QByteArray &bytes, const QString &mime);
+    void onDirectMediaSaved(const QString &chatJid, const QString &msgId,
+                            const QString &path);
+    void onDirectMediaFailed(const QString &chatJid, const QString &msgId,
+                             const QString &error);
     void onQrReady(const QString &status, const QString &qr);
     void onError(const QString &message, const QString &code, int httpStatus);
     void onSyncReady(qint64 nextSince, bool hasMore, const QList<Chat> &chats,
@@ -65,6 +80,9 @@ private slots:
     void onDirectPaired(const QString &jid);
     void onDirectLog(const QString &line);
 
+private slots:
+    void scheduleSyncPoll();
+
 private:
     void buildUi();
     void buildActions();
@@ -72,12 +90,15 @@ private:
     void appendLog(const QString &line);
     void renderMessages();
     QString currentJid() const;
-    void scheduleSyncPoll();
 
     // backends
     ApiClient *m_api = nullptr;
     WhatsAppDirect *m_direct = nullptr;
     bool m_directMode = false;
+    QString m_pendingCredsPath;
+    QPlainTextEdit *m_qrCodeView = 0;   // set while the pairing dialog is open
+    QString m_pendingSavePath;          // where toMediaReady() writes the file
+    QString m_pendingSaveMsgId;
 
     // ui
     QListWidget *m_chatList = nullptr;

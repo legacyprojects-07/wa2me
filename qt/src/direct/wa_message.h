@@ -32,6 +32,9 @@ namespace messaging {
 
 using Bytes = std::vector<uint8_t>;
 
+// True when both jids belong to the same user (device/id suffix ignored).
+bool sameUser(const std::string &a, const std::string &b);
+
 // ── Pre-key bundles ────────────────────────────────────────────────────────
 
 struct DeviceBundle {

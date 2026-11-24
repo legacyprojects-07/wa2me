@@ -1,10 +1,8 @@
 #include "api_client.h"
 #include <QNetworkRequest>
-#include <QHttpMultiPart>
-#include <QHttpPart>
 #include <QFileInfo>
-#include <QUrlQuery>
 #include <QDateTime>
+#include <QUrl>
 
 // ─── Helpers (mirrors helpers.js) ────────────────────────────────────────────
 
@@ -45,19 +43,28 @@ QString ApiClient::enc(const QString &s) {
     return QString::fromUtf8(QUrl::toPercentEncoding(s));
 }
 
+// QMap from an initializer list is Qt 5.1+; this keeps the call sites readable.
+static QMap<QString, QString> qmap(const QList<QPair<QString, QString> > &items) {
+    QMap<QString, QString> map;
+    for (int i = 0; i < items.size(); i++) map.insert(items[i].first, items[i].second);
+    return map;
+}
+
 void ApiClient::setAuthHeader(QNetworkRequest &req) const {
     if (!m_apiKey.isEmpty()) req.setRawHeader("X-API-Key", m_apiKey.toUtf8());
 }
 
 QNetworkReply *ApiClient::get(const QString &path, const QMap<QString, QString> &query) {
     QUrl u = url(path);
+    // QUrlQuery is Qt 5; Qt 4 builds the query with QUrl::addQueryItem.
     if (!query.isEmpty()) {
-        QUrlQuery q;
-        for (auto it = query.constBegin(); it != query.constEnd(); ++it) q.addQueryItem(it.key(), it.value());
-        u.setQuery(q);
+        QUrl q;
+        for (auto it = query.constBegin(); it != query.constEnd(); ++it)
+            q.addQueryItem(it.key(), it.value());
+        u.setEncodedQuery(q.encodedQuery());
     }
     QNetworkRequest req(u);
-    req.setHeader(QNetworkRequest::UserAgentHeader, "OpenKnot-Qt/1.0");
+    req.setRawHeader("User-Agent", "OpenKnot-Qt/1.0");
     setAuthHeader(req);
     return m_nam->get(req);
 }
@@ -65,53 +72,64 @@ QNetworkReply *ApiClient::get(const QString &path, const QMap<QString, QString> 
 QNetworkReply *ApiClient::postJson(const QString &path, const QJsonObject &body) {
     QNetworkRequest req(url(path));
     req.setHeader(QNetworkRequest::ContentTypeHeader, "application/json");
-    req.setHeader(QNetworkRequest::UserAgentHeader, "OpenKnot-Qt/1.0");
+    req.setRawHeader("User-Agent", "OpenKnot-Qt/1.0");
     setAuthHeader(req);
     return m_nam->post(req, QJsonDocument(body).toJson());
 }
 
 QNetworkReply *ApiClient::postForm(const QString &path, const QMap<QString, QString> &fields) {
-    QUrlQuery q;
-    for (auto it = fields.constBegin(); it != fields.constEnd(); ++it) q.addQueryItem(it.key(), it.value());
+    QUrl q;
+    for (auto it = fields.constBegin(); it != fields.constEnd(); ++it)
+        q.addQueryItem(it.key(), it.value());
     QNetworkRequest req(url(path));
     req.setHeader(QNetworkRequest::ContentTypeHeader, "application/x-www-form-urlencoded");
-    req.setHeader(QNetworkRequest::UserAgentHeader, "OpenKnot-Qt/1.0");
+    req.setRawHeader("User-Agent", "OpenKnot-Qt/1.0");
     setAuthHeader(req);
-    return m_nam->post(req, q.toString(QUrl::FullyEncoded).toUtf8());
+    return m_nam->post(req, q.encodedQuery());
 }
 
 QNetworkReply *ApiClient::postMultipart(const QString &path,
                                         const QMap<QString, QString> &fields,
                                         const QList<QFile*> &files,
                                         const QString &fileField) {
-    QHttpMultiPart *mp = new QHttpMultiPart(QHttpMultiPart::FormDataType);
+    // QHttpMultiPart only exists from Qt 4.8, so the body is assembled here.
+    const QByteArray boundary = "----OpenKnotQt" +
+        QByteArray::number(qrand(), 16) + QByteArray::number(QDateTime::currentMSecsSinceEpoch(), 16);
+
+    QByteArray body;
     for (auto it = fields.constBegin(); it != fields.constEnd(); ++it) {
-        QHttpPart part;
-        part.setHeader(QNetworkRequest::ContentDispositionHeader,
-                       QString("form-data; name=\"%1\"").arg(it.key()));
-        part.setBody(it.value().toUtf8());
-        mp->append(part);
+        body += "--" + boundary + "\r\n";
+        body += "Content-Disposition: form-data; name=\"" + it.key().toUtf8() + "\"\r\n";
+        body += "\r\n";
+        body += it.value().toUtf8();
+        body += "\r\n";
     }
-    for (QFile *f : files) {
-        QHttpPart part;
-        QString fname = QFileInfo(f->fileName()).fileName();
-        part.setHeader(QNetworkRequest::ContentDispositionHeader,
-                       QString("form-data; name=\"%1\"; filename=\"%2\"").arg(fileField, fname));
-        part.setHeader(QNetworkRequest::ContentTypeHeader, guessMime(f->fileName()));
-        part.setBodyDevice(f);
-        mp->append(part);
+    for (int i = 0; i < files.size(); i++) {
+        QFile *f = files.at(i);
+        if (!f->isOpen() && !f->open(QIODevice::ReadOnly)) continue;
+        const QByteArray data = f->readAll();
+        const QByteArray fname = QFileInfo(f->fileName()).fileName().toUtf8();
+        body += "--" + boundary + "\r\n";
+        body += "Content-Disposition: form-data; name=\"" + fileField.toUtf8() +
+                "\"; filename=\"" + fname + "\"\r\n";
+        body += "Content-Type: " + guessMime(f->fileName()).toUtf8() + "\r\n";
+        body += "\r\n";
+        body += data;
+        body += "\r\n";
     }
+    body += "--" + boundary + "--\r\n";
+
     QNetworkRequest req(url(path));
-    req.setHeader(QNetworkRequest::UserAgentHeader, "OpenKnot-Qt/1.0");
+    req.setHeader(QNetworkRequest::ContentTypeHeader,
+                  "multipart/form-data; boundary=" + boundary);
+    req.setRawHeader("User-Agent", "OpenKnot-Qt/1.0");
     setAuthHeader(req);
-    QNetworkReply *reply = m_nam->post(req, mp);
-    mp->setParent(reply); // ownership: reply deletes multipart
-    return reply;
+    return m_nam->post(req, body);
 }
 
 void ApiClient::handleJson(QNetworkReply *reply,
                            std::function<void(const QJsonDocument &)> ok) {
-    connect(reply, &QNetworkReply::finished, this, [this, reply, ok]() {
+    SignalHook::onFinished(reply, [this, reply, ok]() {
         const QByteArray body = reply->readAll();
         const int status = reply->attribute(QNetworkRequest::HttpStatusCodeAttribute).toInt();
         reply->deleteLater();
@@ -187,9 +205,11 @@ Message ApiClient::parseMessage(const QJsonObject &o) {
     }
     for (const QJsonValue &rv : o.value("reactions").toArray()) {
         QJsonObject r = rv.toObject();
-        m.reactions.append({r.value("senderJid").toString(),
-                            r.value("emoji").toString(),
-                            r.value("fromMe").toBool()});
+        Reaction reaction;
+        reaction.senderJid = r.value("senderJid").toString();
+        reaction.emoji = r.value("emoji").toString();
+        reaction.fromMe = r.value("fromMe").toBool();
+        m.reactions.append(reaction);
     }
     return m;
 }
@@ -230,7 +250,7 @@ GroupInfo ApiClient::parseGroup(const QJsonObject &o) {
 }
 
 QString ApiClient::guessMediaType(const QString &filePath) {
-    QString ext = QFileInfo(filePath).suffix().toLowerCase();
+    QString ext = QFileInfo(filePath).suffix().toLower();
     if (ext=="jpg"||ext=="jpeg"||ext=="png"||ext=="gif"||ext=="bmp"||ext=="heic"||ext=="webp") return "image";
     if (ext=="mp4"||ext=="3gp"||ext=="3gpp"||ext=="mkv"||ext=="webm"||ext=="m4v") return "video";
     if (ext=="ogg"||ext=="oga"||ext=="opus"||ext=="mp3"||ext=="m4a"||ext=="aac"||ext=="amr"||ext=="wav") return "audio";
@@ -238,17 +258,23 @@ QString ApiClient::guessMediaType(const QString &filePath) {
 }
 
 QString ApiClient::guessMime(const QString &filePath) {
-    QString ext = QFileInfo(filePath).suffix().toLowerCase();
-    static const QMap<QString,QString> m = {
-        {"jpg","image/jpeg"},{"jpeg","image/jpeg"},{"png","image/png"},{"gif","image/gif"},
-        {"webp","image/webp"},{"bmp","image/bmp"},{"heic","image/heic"},
-        {"mp4","video/mp4"},{"3gp","video/3gpp"},{"3gpp","video/3gpp"},{"mkv","video/x-matroska"},
-        {"webm","video/webm"},{"ogg","audio/ogg"},{"opus","audio/ogg"},{"mp3","audio/mpeg"},
-        {"m4a","audio/mp4"},{"aac","audio/aac"},{"amr","audio/amr"},{"wav","audio/wav"},
-        {"pdf","application/pdf"},{"zip","application/zip"},{"txt","text/plain"},
-        {"vcf","text/vcard"},{"apk","application/vnd.android.package-archive"},
+    static const char *const kPairs[][2] = {
+        {"jpg", "image/jpeg"}, {"jpeg", "image/jpeg"}, {"png", "image/png"},
+        {"gif", "image/gif"}, {"webp", "image/webp"}, {"bmp", "image/bmp"},
+        {"heic", "image/heic"}, {"mp4", "video/mp4"}, {"3gp", "video/3gpp"},
+        {"3gpp", "video/3gpp"}, {"mkv", "video/x-matroska"}, {"webm", "video/webm"},
+        {"ogg", "audio/ogg"}, {"opus", "audio/ogg"}, {"mp3", "audio/mpeg"},
+        {"m4a", "audio/mp4"}, {"aac", "audio/aac"}, {"amr", "audio/amr"},
+        {"wav", "audio/wav"}, {"pdf", "application/pdf"}, {"zip", "application/zip"},
+        {"txt", "text/plain"}, {"vcf", "text/vcard"},
+        {"apk", "application/vnd.android.package-archive"},
     };
-    return m.value(ext, "application/octet-stream");
+    // QMap from an initializer list is Qt 5.1+, so the table is plain C here.
+    const QString ext = QFileInfo(filePath).suffix().toLower();
+    for (size_t i = 0; i < sizeof(kPairs) / sizeof(kPairs[0]); i++) {
+        if (ext == QLatin1String(kPairs[i][0])) return QLatin1String(kPairs[i][1]);
+    }
+    return QLatin1String("application/octet-stream");
 }
 
 // ─── System ──────────────────────────────────────────────────────────────────
@@ -272,8 +298,9 @@ void ApiClient::getQr() {
     });
 }
 void ApiClient::getQrImage() {
-    QNetworkReply *r = get("/qr-image", {{"size","256"}});
-    QObject::connect(r, &QNetworkReply::finished, this, [this, r](){
+    QNetworkReply *r = get("/qr-image", qmap(QList<QPair<QString, QString> >()
+                          << qMakePair(QString("size"), QString("256"))));
+    SignalHook::onFinished(r, [this, r](){
         QByteArray b = r->readAll();
         int code = r->attribute(QNetworkRequest::HttpStatusCodeAttribute).toInt();
         r->deleteLater();
@@ -282,14 +309,15 @@ void ApiClient::getQrImage() {
     });
 }
 void ApiClient::resetAuth() {
-    handleJson(postJson("/reset", {}), [this](const QJsonDocument &d){ emit resetDone(d.object()); });
+    handleJson(postJson("/reset", QJsonObject()), [this](const QJsonDocument &d){ emit resetDone(d.object()); });
 }
 
 // ─── Chats ───────────────────────────────────────────────────────────────────
 
 void ApiClient::getChats(int limit, int offset, bool all) {
-    QMap<QString,QString> q = {{"limit", QString::number(limit)},
-                               {"offset", QString::number(offset)}};
+    QMap<QString,QString> q = qmap(QList<QPair<QString, QString> >()
+            << qMakePair(QString("limit"), QString::number(limit))
+            << qMakePair(QString("offset"), QString::number(offset)));
     if (all) q["all"] = "1";
     handleJson(get("/chats", q), [this](const QJsonDocument &d){
         QList<Chat> out;
@@ -342,8 +370,9 @@ void ApiClient::deleteChat(const QString &jid, bool remote) {
 // ─── Messages ────────────────────────────────────────────────────────────────
 
 void ApiClient::getMessages(const QString &jid, int limit, qint64 before, qint64 after, bool markRead) {
-    QMap<QString,QString> q = {{"limit", QString::number(limit)},
-                               {"markRead", markRead ? "1" : "0"}};
+    QMap<QString,QString> q = qmap(QList<QPair<QString, QString> >()
+            << qMakePair(QString("limit"), QString::number(limit))
+            << qMakePair(QString("markRead"), QString(markRead ? "1" : "0")));
     if (before >= 0) q["before"] = QString::number(before);
     if (after >= 0) q["after"] = QString::number(after);
     QString j = normalizeJid(jid);
@@ -357,13 +386,17 @@ void ApiClient::getMessage(const QString &jid, const QString &msgId) {
     handleJson(get("/messages/" + enc(normalizeJid(jid)) + "/" + enc(msgId)),
            [this](const QJsonDocument &d){ emit messageReady(parseMessage(d.object())); });
 }
+void ApiClient::downloadMedia(const QString &jid, const QString &msgId) {
+    getMedia(jid, msgId, false, true);
+}
+
 void ApiClient::getMedia(const QString &jid, const QString &msgId, bool thumb, bool download) {
     QMap<QString,QString> q;
     if (thumb) q["thumb"] = "1";
     if (download) q["download"] = "1";
     QNetworkReply *r = get("/messages/" + enc(normalizeJid(jid)) + "/" + enc(msgId) + "/media", q);
     QString j = normalizeJid(jid);
-    QObject::connect(r, &QNetworkReply::finished, this, [this, r, j, msgId](){
+    SignalHook::onFinished(r, [this, r, j, msgId](){
         QByteArray b = r->readAll();
         QString mime = r->header(QNetworkRequest::ContentTypeHeader).toString();
         int code = r->attribute(QNetworkRequest::HttpStatusCodeAttribute).toInt();
@@ -396,8 +429,10 @@ void ApiClient::editMessage(const QString &jid, const QString &msgId, const QStr
 // ─── Search / sync ───────────────────────────────────────────────────────────
 
 void ApiClient::searchMessages(const QString &q, const QString &jid, int limit, int offset) {
-    QMap<QString,QString> query = {{"q", q}, {"limit", QString::number(limit)},
-                                   {"offset", QString::number(offset)}};
+    QMap<QString,QString> query = qmap(QList<QPair<QString, QString> >()
+            << qMakePair(QString("q"), q)
+            << qMakePair(QString("limit"), QString::number(limit))
+            << qMakePair(QString("offset"), QString::number(offset)));
     if (!jid.isEmpty()) query["jid"] = normalizeJid(jid);
     handleJson(get("/search", query), [this](const QJsonDocument &d){
         QList<Message> out;
@@ -406,8 +441,9 @@ void ApiClient::searchMessages(const QString &q, const QString &jid, int limit, 
     });
 }
 void ApiClient::sync(qint64 sinceMs, int limit) {
-    handleJson(get("/sync", {{"since", QString::number(sinceMs)},
-                         {"limit", QString::number(limit)}}),
+    handleJson(get("/sync", qmap(QList<QPair<QString, QString> >()
+                           << qMakePair(QString("since"), QString::number(sinceMs))
+                           << qMakePair(QString("limit"), QString::number(limit)))),
            [this](const QJsonDocument &d){
         QJsonObject o = d.object();
         QList<Chat> chats;
@@ -436,15 +472,16 @@ void ApiClient::sendMedia(const QString &jid, const QString &filePath,
         return;
     }
     QString type = mediaType.isEmpty() ? guessMediaType(filePath) : mediaType;
-    QMap<QString,QString> fields = {{"jid", normalizeJid(jid)},
-                                    {"mediaType", type},
-                                    {"caption", caption},
-                                    {"mimetype", guessMime(filePath)},
-                                    {"fileName", QFileInfo(filePath).fileName()}};
+    QMap<QString,QString> fields = qmap(QList<QPair<QString, QString> >()
+            << qMakePair(QString("jid"), normalizeJid(jid))
+            << qMakePair(QString("mediaType"), type)
+            << qMakePair(QString("caption"), caption)
+            << qMakePair(QString("mimetype"), guessMime(filePath))
+            << qMakePair(QString("fileName"), QFileInfo(filePath).fileName()));
     if (!quotedId.isEmpty()) fields["quotedId"] = quotedId;
     if (ptt) fields["ptt"] = "1";
-    QNetworkReply *r = postMultipart("/send", fields, {f}, "file");
-    QObject::connect(r, &QNetworkReply::finished, this, [this, r](){
+    QNetworkReply *r = postMultipart("/send", fields, QList<QFile *>() << f, "file");
+    SignalHook::onFinished(r, [this, r](){
         QJsonDocument d = QJsonDocument::fromJson(r->readAll());
         int code = r->attribute(QNetworkRequest::HttpStatusCodeAttribute).toInt();
         r->deleteLater();
@@ -528,10 +565,11 @@ void ApiClient::getPresence(const QString &jid) {
                [this](const QJsonDocument &d){ emit presenceReady(d.object()); });
 }
 void ApiClient::getProfilePic(const QString &jid, bool preview) {
-    QNetworkReply *r = get("/profile-pic/" + enc(normalizeJid(jid)),
-                           preview ? QMap<QString,QString>{{"preview","1"}} : QMap<QString,QString>{});
+    QMap<QString, QString> query;
+    if (preview) query.insert("preview", "1");
+    QNetworkReply *r = get("/profile-pic/" + enc(normalizeJid(jid)), query);
     QString j = normalizeJid(jid);
-    QObject::connect(r, &QNetworkReply::finished, this, [this, r, j](){
+    SignalHook::onFinished(r, [this, r, j](){
         QByteArray b = r->readAll();
         int code = r->attribute(QNetworkRequest::HttpStatusCodeAttribute).toInt();
         r->deleteLater();
@@ -543,8 +581,9 @@ void ApiClient::getProfilePic(const QString &jid, bool preview) {
 // ─── Groups ──────────────────────────────────────────────────────────────────
 
 void ApiClient::getGroups(int limit, int offset) {
-    handleJson(get("/groups", {{"limit", QString::number(limit)},
-                           {"offset", QString::number(offset)}}),
+    handleJson(get("/groups", qmap(QList<QPair<QString, QString> >()
+                             << qMakePair(QString("limit"), QString::number(limit))
+                             << qMakePair(QString("offset"), QString::number(offset)))),
            [this](const QJsonDocument &d){
         QList<Chat> out;
         for (const QJsonValue &v : d.array()) out.append(parseChat(v.toObject()));

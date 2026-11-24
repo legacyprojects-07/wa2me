@@ -8,9 +8,8 @@
 #include <QObject>
 #include <QNetworkAccessManager>
 #include <QNetworkReply>
-#include <QJsonDocument>
-#include <QJsonObject>
-#include <QJsonArray>
+#include "qt4compat/json.h"      // QJson* (real Qt 5 classes on Qt 5+)
+#include "qt4compat/qt4compat.h"  // QStringLiteral/toHtmlEscaped/functor hooks
 #include <QUrl>
 #include <QFile>
 #include <QList>
@@ -53,6 +52,9 @@ public:
     void getMessages(const QString &jid, int limit = 100,
                      qint64 before = -1, qint64 after = -1, bool markRead = true);
     void getMessage(const QString &jid, const QString &msgId);
+    // Fetch the full media of a message (proxy mode) and emit mediaReady().
+    void downloadMedia(const QString &jid, const QString &msgId);
+
     void getMedia(const QString &jid, const QString &msgId,
                   bool thumb = false, bool download = false);
     void deleteMessage(const QString &jid, const QString &msgId,

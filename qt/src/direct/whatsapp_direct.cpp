@@ -3,14 +3,10 @@
 #include <QFile>
 #include <QFileInfo>
 #include <QDir>
-#include <QJsonDocument>
-#include <QJsonObject>
-#include <QJsonArray>
 #include <QDateTime>
 #include <QNetworkAccessManager>
 #include <QNetworkReply>
 #include <QNetworkRequest>
-#include <QRandomGenerator>
 #include <QUrl>
 #include <QDebug>
 
@@ -154,28 +150,23 @@ private:
 
 WhatsAppDirect::WhatsAppDirect(QObject *parent) : QObject(parent) {
     m_keepAlive.setInterval(30000);   // keepAliveIntervalMs
-    connect(&m_keepAlive, &QTimer::timeout, this, &WhatsAppDirect::sendKeepAlive);
+    connect(&m_keepAlive, SIGNAL(timeout()), this, SLOT(sendKeepAlive()));
 
     m_reconnectTimer.setSingleShot(true);
-    connect(&m_reconnectTimer, &QTimer::timeout, this, [this]() {
+    SignalHook::attach(&m_reconnectTimer, SIGNAL(timeout()), [this]() {
         if (m_manualDisconnect) return;
         // Baileys: reconnect after 5s unless the session was logged out.
         m_reconnectAttempts++;
-        emit connectionUpdate("connecting", QString("reconnect #%1").arg(m_reconnectAttempts));
+        emit connectionUpdate("connecting",
+                              QString("reconnect #%1").arg(m_reconnectAttempts));
         connectToWhatsApp();
-    });
+    }, false);
 
-    connect(&m_socket, &QWebSocket::connected, this, &WhatsAppDirect::onConnected);
-    connect(&m_socket, &QWebSocket::disconnected, this, &WhatsAppDirect::onDisconnected);
-    connect(&m_socket, &QWebSocket::binaryMessageReceived,
-            this, &WhatsAppDirect::onBinaryMessage);
-#if QT_VERSION >= QT_VERSION_CHECK(6, 0, 0)
-    connect(&m_socket, &QWebSocket::errorOccurred, this,
-            [this](QAbstractSocket::SocketError e) { onSocketError(e); });
-#else
-    connect(&m_socket, QOverload<QAbstractSocket::SocketError>::of(&QWebSocket::error),
-            this, [this](QAbstractSocket::SocketError e) { onSocketError(e); });
-#endif
+    connect(&m_socket, SIGNAL(connected()), this, SLOT(onConnected()));
+    connect(&m_socket, SIGNAL(disconnected()), this, SLOT(onDisconnected()));
+    connect(&m_socket, SIGNAL(binaryMessageReceived(QByteArray)), this,
+            SLOT(onBinaryMessage(QByteArray)));
+    connect(&m_socket, SIGNAL(error(QString)), this, SLOT(onSocketError(QString)));
 
     m_net = new QNetworkAccessManager(this);
     m_store.reset(new CredsStore(this));
@@ -222,7 +213,9 @@ void WhatsAppDirect::generateNewCredentials() {
     m_signedPreKeySig = toQ(wa::crypto::xeddsaSign(toStd(m_identityPriv), prefixedSignedKey));
     m_signedPreKeyId = 1;
 
-    m_registrationId = QRandomGenerator::global()->bounded(1u, 0x3ffffeu);
+    // Baileys: a random 14-bit registration id.
+    const wa::crypto::Bytes regBytes = wa::crypto::randomBytes(4);
+    m_registrationId = (quint32(regBytes[0]) << 8 | quint32(regBytes[1])) % 0x3fffeu + 1;
     m_advSecretKey = randomBytes32();
     m_meJid.clear();
     m_hasMe = false;
@@ -312,18 +305,15 @@ void WhatsAppDirect::connectToWhatsApp() {
         generateNewCredentials();
     }
 
-    QNetworkRequest req(QUrl(QString::fromLatin1(kWebSocketUrl)));
-    // WhatsApp requires the browser Origin and a desktop User-Agent.
-    req.setRawHeader("Origin", kOrigin);
-    req.setRawHeader("User-Agent",
-                     QString("Mozilla/5.0 (%1) AppleWebKit/537.36 (KHTML, like Gecko) "
-                             "Chrome/120.0.0.0 Safari/537.36")
-                         .arg(m_browserOs)
-                         .toUtf8());
+    // WhatsApp requires the browser Origin and a desktop User-Agent; both go
+    // into the HTTP upgrade request of the transport.
+    const QString userAgent =
+        QString("Mozilla/5.0 (%1) AppleWebKit/537.36 (KHTML, like Gecko) "
+                "Chrome/120.0.0.0 Safari/537.36").arg(m_browserOs);
 
     emit connectionUpdate("connecting", "opening websocket");
     DLOG(this, "connecting to " + QString::fromLatin1(kWebSocketUrl));
-    m_socket.open(req);
+    m_socket.open(QUrl(QString::fromLatin1(kWebSocketUrl)), kOrigin, userAgent.toUtf8());
 }
 
 void WhatsAppDirect::disconnectFromWhatsApp() {
@@ -375,10 +365,9 @@ void WhatsAppDirect::onDisconnected() {
     }
 }
 
-void WhatsAppDirect::onSocketError(QAbstractSocket::SocketError error) {
-    Q_UNUSED(error)
-    emit connectionUpdate("error", m_socket.errorString());
-    DLOG(this, "socket error: " + m_socket.errorString());
+void WhatsAppDirect::onSocketError(const QString &reason) {
+    emit connectionUpdate("error", reason);
+    DLOG(this, "socket error: " + reason);
 }
 
 // ─── Handshake ─────────────────────────────────────────────────────────────
@@ -389,7 +378,8 @@ void WhatsAppDirect::sendClientHello() {
     const wa::crypto::CurveKeyPair eph = wa::crypto::generateCurveKeyPair();
     m_ephPriv = toQ(eph.priv);
     m_ephPub = toQ(eph.pub);
-    m_noise = std::make_unique<wa::noise::NoiseHandler>(eph.priv, eph.pub);
+    // std::make_unique is C++14; the Symbian toolchain stops earlier.
+    m_noise.reset(new wa::noise::NoiseHandler(eph.priv, eph.pub));
 
     wa::proto::ClientHello hello;
     hello.ephemeral = eph.pub;
@@ -438,7 +428,9 @@ bool WhatsAppDirect::sendClientFinish() {
     payload.connectReason = 1;    // USER_ACTIVATED
     payload.hasUserAgent = true;
     payload.userAgent.platform = 1;   // WEB
-    payload.userAgent.appVersion = {m_appVersionPrimary, m_appVersionSecondary, m_appVersionTertiary};
+    payload.userAgent.appVersion.primary = m_appVersionPrimary;
+    payload.userAgent.appVersion.secondary = m_appVersionSecondary;
+    payload.userAgent.appVersion.tertiary = m_appVersionTertiary;
     payload.userAgent.localeCountryIso31661Alpha2 = "US";
     payload.webSubPlatform = 0;       // WEB_BROWSER
     payload.hasPassive = true;
@@ -590,7 +582,7 @@ void WhatsAppDirect::handleNode(const BinaryNode &node) {
                 }
                 return;
             }
-            conn.fetchedAt = QDateTime::currentSecsSinceEpoch();
+            conn.fetchedAt = qt_now_secs();
             m_mediaConn = conn;
             DLOG(this, QString("media connection ready (host %1, ttl %2s)")
                            .arg(QString::fromStdString(conn.hostname))
@@ -617,7 +609,7 @@ void WhatsAppDirect::handleNode(const BinaryNode &node) {
                                QString::fromStdString(error));
                 return;
             }
-            if (info.subject.isEmpty())
+            if (info.subject.empty())
                 info.subject = pending.jid.toStdString();
             m_groupCache.insert(pending.jid, info);
             Chat chat = chatModelFor(info.jid);
@@ -803,7 +795,7 @@ void WhatsAppDirect::downloadHistory(const wa::waproto::HistorySyncNotification 
     req.setRawHeader("Origin", "https://web.whatsapp.net");
     QNetworkReply *reply = m_net->get(req);
     const wa::waproto::HistorySyncNotification carried = note;
-    connect(reply, &QNetworkReply::finished, this, [this, reply, carried]() {
+    SignalHook::onFinished(reply, [this, reply, carried]() {
         const QByteArray data = reply->readAll();
         const QString netError = reply->error() == QNetworkReply::NoError
                                      ? QString()
@@ -958,7 +950,7 @@ void WhatsAppDirect::sendMedia(const QString &jid, const QString &filePath,
     const wa::media::Bytes key(mediaKey.begin(), mediaKey.end());
     std::string error;
     if (!wa::media::prepareUpload(toStd(raw), upload.type, key,
-                                  QDateTime::currentSecsSinceEpoch(), upload.uploaded,
+                                  qt_now_secs(), upload.uploaded,
                                   error)) {
         emit sendResult(upload.send.msgId, false, QString::fromStdString(error));
         return;
@@ -971,7 +963,7 @@ void WhatsAppDirect::sendMedia(const QString &jid, const QString &filePath,
                    .arg(QString::fromStdString(fileName))
                    .arg(int(upload.uploaded.blob.size())));
 
-    if (m_mediaConn.usable(QDateTime::currentSecsSinceEpoch())) {
+    if (m_mediaConn.usable(qt_now_secs())) {
         PendingSend ready;
         ready.jid = jid;
         ready.msgId = uploadId;
@@ -1009,7 +1001,7 @@ void WhatsAppDirect::startMediaUpload(const PendingSend &pending) {
                    .arg(uploadId)
                    .arg(int(upload.uploaded.blob.size())));
 
-    connect(reply, &QNetworkReply::finished, this, [this, reply, uploadId]() {
+    SignalHook::onFinished(reply, [this, reply, uploadId]() {
         const QByteArray body = reply->readAll();
         const QString errorText =
             reply->error() == QNetworkReply::NoError ? QString() : reply->errorString();
@@ -1082,8 +1074,7 @@ bool WhatsAppDirect::downloadMedia(const QString &chatJid, const QString &msgId,
     emit mediaProgress(msgId, "downloading");
 
     const int kind = entry.first;
-    connect(reply, &QNetworkReply::finished, this,
-            [this, reply, chatJid, msgId, savePath, mediaKey, kind]() {
+    SignalHook::onFinished(reply, [this, reply, chatJid, msgId, savePath, mediaKey, kind]() {
                 const QByteArray body = reply->readAll();
                 const QString errorText = reply->error() == QNetworkReply::NoError
                                               ? QString()
@@ -1136,7 +1127,7 @@ void WhatsAppDirect::uploadPreKeys() {
     if (m_preKeys.isEmpty()) return;
 
     BinaryNode iq("iq");
-    iq.setAttr("id", m_meJid + "-" + QString::number(m_nextPreKeyId).toStdString());
+    iq.setAttr("id", (m_meJid + "-" + QString::number(m_nextPreKeyId)).toStdString());
     iq.setAttr("type", "set");
     iq.setAttr("xmlns", "encrypt");
     iq.setAttr("to", "s.whatsapp.net");
@@ -1200,7 +1191,7 @@ void WhatsAppDirect::fetchGroupBundles(const PendingSend &pending,
     std::vector<std::string> users;
     users.push_back(m_meJid.toStdString());
     for (const auto &p : info.participants) {
-        if (wa::sameUser(p, m_meJid.toStdString())) continue;
+        if (wa::messaging::sameUser(p, m_meJid.toStdString())) continue;
         users.push_back(p);
     }
 
@@ -1306,8 +1297,10 @@ void WhatsAppDirect::finishSend(const QString &iqId, const wa::BinaryNode &iqNod
             filtered.push_back(d);
         }
         devices.swap(filtered);
-        m_bundleCache.insert(userJid, CachedBundles{QDateTime::currentMSecsSinceEpoch(),
-                                                    devices});
+        CachedBundles cached;
+        cached.fetchedAt = QDateTime::currentMSecsSinceEpoch();
+        cached.devices = devices;
+        m_bundleCache.insert(userJid, cached);
     }
 
     sendWithBundles(pending, devices);
@@ -1353,7 +1346,7 @@ void WhatsAppDirect::sendWithBundles(const PendingSend &pending,
     echo.fromMe = true;
     echo.senderJid = m_meJid;
     echo.text = pending.text;
-    echo.timestamp = QDateTime::currentDateTimeUtc().toSecsSinceEpoch();
+    echo.timestamp = qt_now_secs();
     echo.status = QStringLiteral("sent");
     emit messageAdded(echo);
 }

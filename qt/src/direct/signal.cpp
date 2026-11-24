@@ -626,9 +626,11 @@ void putU32(Bytes &out, uint32_t v) {
 }
 
 struct Cursor {
+    explicit Cursor(const Bytes &bytes) : data(bytes), pos(0), ok(true) {}
+
     const Bytes &data;
-    size_t pos = 0;
-    bool ok = true;
+    size_t pos;
+    bool ok;
 
     bool take(Bytes &out, size_t n) {
         if (pos + n > data.size()) { ok = false; return false; }
@@ -691,7 +693,7 @@ Bytes serializeRecord(const Record &record) {
 }
 
 bool deserializeRecord(const Bytes &data, Record &out) {
-    Cursor cur{data};
+    Cursor cur(data);
     out.sessions.clear();
     const uint32_t count = cur.u32();
     for (uint32_t i = 0; i < count && cur.ok; i++) {
@@ -754,7 +756,7 @@ Bytes serializeBundle(const Bundle &b) {
 }
 
 bool deserializeBundle(const Bytes &data, Bundle &out) {
-    Cursor cur{data};
+    Cursor cur(data);
     out.identityKey = cur.blob();
     out.registrationId = cur.u32();
     out.signedPreKey.id = cur.u32();
