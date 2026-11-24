@@ -153,7 +153,7 @@ void MainWindow::buildActions() {
 void MainWindow::applyMode() {
     const bool proxy = !m_directMode;
     m_attachBtn->setEnabled(proxy);
-    m_statusLabel->setText(m_directMode ? "Direct mode — transport only (see log)"
+    m_statusLabel->setText(m_directMode ? QStringLiteral("Direct mode — WhatsApp Web")
                                         : QString("Proxy mode — %1").arg(m_baseUrl));
 }
 
