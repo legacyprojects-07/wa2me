@@ -4,8 +4,9 @@
 // protobufjs. Requiring protoc + protobuf-lite on Symbian is painful, so the
 // handful of messages needed *before* a session exists (handshake, client
 // payload, cert chain, device props) are hand-coded here with a tiny writer
-// and reader. Everything after login (Message, HistorySync, AppStateSync…)
-// still needs the real WAProto — see QT_PORT.md §2.3.
+// and reader. The post-login messages (Message, HistorySync, …) live in
+// wa_proto.h on top of the same Writer/Reader; AppStateSync patches are still
+// missing (QT_PORT.md §2.3).
 //
 // Encoding is verified byte-for-byte against Baileys' generated proto code
 // in qt/tests/test_proto.cpp.

@@ -49,6 +49,12 @@ Bytes aes256CbcEncrypt(const Bytes &plaintext, const Bytes &key, const Bytes &iv
 bool aes256CbcDecrypt(const Bytes &ciphertext, const Bytes &key,
                       const Bytes &iv, Bytes &plaintext);
 
+// Same, but without stripping/validating PKCS#7 padding. WhatsApp's media
+// format appends a padding region whose contents are random, so callers that
+// know the real length (or strip the last byte themselves) need this.
+bool aes256CbcDecryptRaw(const Bytes &ciphertext, const Bytes &key,
+                         const Bytes &iv, Bytes &plaintext);
+
 // AES-256-CTR (used by some media helpers).
 Bytes aes256Ctr(const Bytes &input, const Bytes &key, const Bytes &iv);
 

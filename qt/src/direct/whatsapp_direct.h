@@ -11,11 +11,10 @@
 //
 // Status (see QT_PORT.md §3):
 //   WORKING   : websocket lifecycle, Noise handshake, framing, QR pairing
-//               payloads, stream error handling, keepalive, stanza routing
-//   TODO      : Signal (X3DH/Double Ratchet) message encryption, WAProto
-//               Message/HistorySync decoding, media CDN crypto, app state.
-//               Those need libsignal-protocol-c + generated WAProto; the
-//               hooks are marked `TODO(signal)` / `TODO(proto)` below.
+//               payloads, stream error handling, keepalive, stanza routing,
+//               1:1 text send/receive (Signal), HistorySync download+decode
+//   TODO      : group sender-key messages (skmsg), media upload/download,
+//               app state (mute/pin/archive), presence privacy.
 
 #include <QObject>
 #include <QWebSocket>
@@ -23,12 +22,21 @@
 #include <QByteArray>
 #include <QString>
 #include <QJsonObject>
+#include <QJsonArray>
 #include <QVariantMap>
+#include <QHash>
 
 #include <memory>
+#include <vector>
 
 #include "binary_node.h"
+#include "models.h"
 #include "noise.h"
+#include "signal.h"
+#include "wa_history.h"
+#include "wa_message.h"
+
+class QNetworkAccessManager;
 
 class WhatsAppDirect : public QObject {
     Q_OBJECT
@@ -55,8 +63,9 @@ public slots:
     void logout();                       // clears credentials, then disconnects
     void requestPairingQr();              // ask the server for a fresh QR
 
-    // Minimal send API. Text send requires Signal encryption (TODO(signal));
-    // messages are queued and the encryption hook is where libsignal plugs in.
+    // Text send. Device bundles are fetched with <iq xmlns=encrypt> the first
+    // time, then cached; the message is Signal-encrypted per device and sent
+    // as a <message> stanza. Failures are reported through sendResult().
     void sendText(const QString &jid, const QString &text);
 
 signals:
@@ -70,11 +79,15 @@ signals:
 
     // Stanzas (decoded BinaryNodes, exposed as maps for the UI/debug view)
     void nodeReceived(const QString &tag, const QVariantMap &attrs);
-    void incomingMessage(const QJsonObject &message);      // TODO(proto) populates
+    void incomingMessage(const QJsonObject &message);      // raw dump for debugging
     void messageStatus(const QString &chatJid, const QString &msgId,
                        const QString &status);
     void presenceUpdate(const QString &jid, const QString &presence);
-    void historySyncReceived(int progress, int chats, int messages); // TODO(proto)
+
+    // Decoded traffic for MainWindow (same models the REST client emits).
+    void chatUpdated(const Chat &chat);
+    void messageAdded(const Message &message);
+    void historySyncReceived(int progress, int chats, int messages);
 
     void sendResult(const QString &id, bool ok, const QString &error);
     void logLine(const QString &line);
@@ -106,10 +119,44 @@ private:
     void generateNewCredentials();
     QByteArray randomBytes32();
 
-    // Message handling hooks that need the full WAProto + Signal stack.
-    void handleEncryptedMessage(const wa::BinaryNode &node);   // TODO(signal)
+    // Message handling (Signal + WAProto, see wa_message.h / wa_history.h).
+    void handleEncryptedMessage(const wa::BinaryNode &node);
     void handleReceipt(const wa::BinaryNode &node);
     void handlePresence(const wa::BinaryNode &node);
+
+    // ── Signal / message plumbing ────────────────────────────────────────
+    class CredsStore;                       // wa::signal::Store over creds.json
+
+    void ensurePreKeys(int count);          // generate one-time pre-keys
+    void uploadPreKeys();                   // <iq type=set xmlns=encrypt>
+    void finishSend(const QString &iqId, const wa::BinaryNode &iqNode);
+    void sendWithBundles(const PendingSend &pending,
+                         std::vector<wa::messaging::DeviceBundle> devices);
+    void sendReceipt(const wa::BinaryNode &node);
+    void downloadHistory(const wa::waproto::HistorySyncNotification &note);
+    Chat chatModelFor(const std::string &jid) const;
+    Message messageModelFor(const wa::messaging::IncomingMessage &in) const;
+
+    struct PendingSend {
+        QString jid;
+        QString text;
+        QString msgId;
+    };
+    struct CachedBundles {
+        qint64 fetchedAt = 0;
+        std::vector<wa::messaging::DeviceBundle> devices;
+    };
+
+    std::unique_ptr<CredsStore> m_store;
+    QNetworkAccessManager *m_net = nullptr;
+    QHash<QString, PendingSend> m_pendingSends;   // iq id -> queued message
+    QHash<QString, CachedBundles> m_bundleCache;  // user jid -> device bundles
+    QJsonArray m_preKeys;      // [{id, priv, pub}] one-time pre-keys
+    QJsonObject m_sessions;    // address -> hex(signal::serializeRecord)
+    quint32 m_nextPreKeyId = 1;
+    quint32 m_lastUploadedPreKeyId = 0;
+    wa::history::SyncData m_history;
+    bool m_preKeysUploaded = false;
 
     QWebSocket m_socket;
     std::unique_ptr<wa::noise::NoiseHandler> m_noise;

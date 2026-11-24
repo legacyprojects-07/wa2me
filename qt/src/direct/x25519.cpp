@@ -17,7 +17,7 @@ const gf k121665 = {0xDB41, 1};
 // Base point u = 9
 const uint8_t kBasePoint[32] = {9};
 
-void set25519(gf r, const gf a) {
+[[maybe_unused]] void set25519(gf r, const gf a) {
     for (int i = 0; i < 16; i++) r[i] = a[i];
 }
 

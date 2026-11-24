@@ -50,6 +50,8 @@ private slots:
 
     // ApiClient
     void onChatsReady(const QList<Chat> &chats);
+    void onDirectChat(const Chat &chat);
+    void onDirectMessage(const Message &message);
     void onMessagesReady(const QString &jid, const QList<Message> &messages);
     void onSendDone(const QJsonObject &obj);
     void onQrReady(const QString &status, const QString &qr);

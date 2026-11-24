@@ -7,14 +7,20 @@
 #include <QJsonObject>
 #include <QJsonArray>
 #include <QDateTime>
+#include <QNetworkAccessManager>
+#include <QNetworkReply>
 #include <QNetworkRequest>
 #include <QRandomGenerator>
+#include <QUrl>
 #include <QDebug>
 
 #include "aes_gcm.h"
+#include "ed25519.h"
+#include "media_crypto.h"
 #include "proto_min.h"
 #include "sha256.h"
 #include "x25519.h"
+#include "wa_proto.h"
 
 using wa::BinaryNode;
 using wa::proto::Bytes;
@@ -40,6 +46,85 @@ QByteArray fromB64(const QString &s) { return QByteArray::fromBase64(s.toLatin1(
 
 } // namespace
 
+// ── Signal store backed by the creds.json document ─────────────────────────
+//
+// wa::signal::Store needs identity/pre-keys/sessions; the Qt client keeps them
+// in the same JSON file as the Noise key, which is what makes the account
+// resumable after a restart (the wireless equivalent of Baileys' authState).
+class WhatsAppDirect::CredsStore : public wa::signal::Store {
+public:
+    explicit CredsStore(WhatsAppDirect *owner) : q(owner) {}
+
+    wa::signal::KeyPair ourIdentity() override {
+        wa::signal::KeyPair kp;
+        kp.priv = toStd(q->m_identityPriv);
+        kp.pub = withPrefix(toStd(q->m_identityPub));
+        return kp;
+    }
+
+    uint32_t ourRegistrationId() override { return q->m_registrationId; }
+
+    bool loadPreKey(uint32_t id, wa::signal::KeyPair &out) override {
+        for (const QJsonValue &v : q->m_preKeys) {
+            const QJsonObject o = v.toObject();
+            if (quint32(o.value("id").toInt()) != id) continue;
+            out.priv = toStd(fromB64(o.value("priv").toString()));
+            out.pub = withPrefix(toStd(fromB64(o.value("pub").toString())));
+            return out.priv.size() == 32;
+        }
+        return false;
+    }
+
+    void removePreKey(uint32_t id) override {
+        QJsonArray kept;
+        for (const QJsonValue &v : q->m_preKeys) {
+            if (quint32(v.toObject().value("id").toInt()) != id) kept.append(v);
+        }
+        q->m_preKeys = kept;
+        q->saveCredentials();
+    }
+
+    bool loadSignedPreKey(uint32_t id, wa::signal::KeyPair &out) override {
+        Q_UNUSED(id)
+        out.priv = toStd(q->m_signedPreKeyPriv);
+        out.pub = withPrefix(toStd(q->m_signedPreKeyPub));
+        return out.priv.size() == 32;
+    }
+
+    wa::signal::Record loadSession(const std::string &address) override {
+        wa::signal::Record record;
+        const QJsonValue v = q->m_sessions.value(QString::fromStdString(address));
+        if (v.isString()) {
+            wa::signal::Record parsed;
+            if (wa::signal::deserializeRecord(
+                    wa::crypto::fromHex(v.toString().toStdString()), parsed)) {
+                record = parsed;
+            }
+        }
+        return record;
+    }
+
+    void storeSession(const std::string &address, const wa::signal::Record &record) override {
+        q->m_sessions[QString::fromStdString(address)] = QString::fromStdString(
+            wa::crypto::toHex(wa::signal::serializeRecord(record)));
+        q->saveCredentials();
+    }
+
+private:
+    // Public keys on the Signal wire carry WhatsApp's 0x05 bundle prefix.
+    static Bytes withPrefix(const Bytes &raw) {
+        if (raw.size() == 33) return raw;
+        Bytes out;
+        out.push_back(0x05);
+        out.insert(out.end(), raw.begin(), raw.end());
+        return out;
+    }
+
+    WhatsAppDirect *q;
+};
+
+
+
 WhatsAppDirect::WhatsAppDirect(QObject *parent) : QObject(parent) {
     m_keepAlive.setInterval(30000);   // keepAliveIntervalMs
     connect(&m_keepAlive, &QTimer::timeout, this, &WhatsAppDirect::sendKeepAlive);
@@ -64,6 +149,9 @@ WhatsAppDirect::WhatsAppDirect(QObject *parent) : QObject(parent) {
     connect(&m_socket, QOverload<QAbstractSocket::SocketError>::of(&QWebSocket::error),
             this, [this](QAbstractSocket::SocketError e) { onSocketError(e); });
 #endif
+
+    m_net = new QNetworkAccessManager(this);
+    m_store.reset(new CredsStore(this));
 
     m_credsPath = QDir::homePath() + "/.openknot-qt/creds.json";
 }
@@ -99,16 +187,22 @@ void WhatsAppDirect::generateNewCredentials() {
     const wa::crypto::CurveKeyPair preKey = wa::crypto::generateCurveKeyPair();
     m_signedPreKeyPriv = toQ(preKey.priv);
     m_signedPreKeyPub = toQ(preKey.pub);
-    // TODO(signal): the pre-key signature is an XEdDSA signature over the
-    // 33-byte prefixed public key. XEdDSA needs libsignal-protocol-c; until
-    // then we still register, but the server rejects pre-key upload.
-    m_signedPreKeySig = QByteArray(64, '\0');
+    // The server (and the peer) verify an XEdDSA signature over the *prefixed*
+    // 33-byte signed pre-key, exactly like libsignal's generateSignedPreKey.
+    Bytes prefixedSignedKey = toStd(m_signedPreKeyPub);
+    prefixedSignedKey.insert(prefixedSignedKey.begin(), 0x05);
+    m_signedPreKeySig = toQ(wa::crypto::xeddsaSign(toStd(m_identityPriv), prefixedSignedKey));
     m_signedPreKeyId = 1;
 
     m_registrationId = QRandomGenerator::global()->bounded(1u, 0x3ffffeu);
     m_advSecretKey = randomBytes32();
     m_meJid.clear();
     m_hasMe = false;
+    m_preKeys = QJsonArray();
+    m_sessions = QJsonObject();
+    m_nextPreKeyId = 1;
+    m_preKeysUploaded = false;
+    ensurePreKeys(30);   // INITIAL_PREKEY_COUNT
     saveCredentials();
 }
 
@@ -128,6 +222,11 @@ bool WhatsAppDirect::loadCredentials() {
     m_advSecretKey = fromB64(o.value("advSecretKey").toString());
     m_meJid = o.value("meJid").toString();
     m_hasMe = !m_meJid.isEmpty();
+    m_preKeys = o.value("preKeys").toArray();
+    m_sessions = o.value("sessions").toObject();
+    m_nextPreKeyId = quint32(o.value("nextPreKeyId").toInt(1));
+    m_lastUploadedPreKeyId = quint32(o.value("lastUploadedPreKeyId").toInt(0));
+    m_preKeysUploaded = o.value("preKeysUploaded").toBool(false);
 
     if (o.contains("appVersion")) {
         const QJsonObject v = o.value("appVersion").toObject();
@@ -157,6 +256,11 @@ bool WhatsAppDirect::saveCredentials() {
     o["registrationId"] = int(m_registrationId);
     o["advSecretKey"] = b64(m_advSecretKey);
     o["meJid"] = m_meJid;
+    o["preKeys"] = m_preKeys;
+    o["sessions"] = m_sessions;
+    o["nextPreKeyId"] = int(m_nextPreKeyId);
+    o["lastUploadedPreKeyId"] = int(m_lastUploadedPreKeyId);
+    o["preKeysUploaded"] = m_preKeysUploaded;
     QJsonObject v;
     v["primary"] = int(m_appVersionPrimary);
     v["secondary"] = int(m_appVersionSecondary);
@@ -431,6 +535,13 @@ void WhatsAppDirect::handleNode(const BinaryNode &node) {
         return;
     }
     if (tag == "iq") {
+        // Answers to our <iq xmlns=encrypt><key/></iq> key requests.
+        const QString iqId = QString::fromStdString(node.attrOr("id"));
+        const QString iqType = attrs.value("type").toString();
+        if (m_pendingSends.contains(iqId) && (iqType == "result" || iqType == "error")) {
+            finishSend(iqId, node);
+            return;
+        }
         // <pair-device> arrives as an iq with type=set.
         if (const BinaryNode *pair = node.child("pair-device")) {
             handlePairDevice(*pair);
@@ -479,6 +590,10 @@ void WhatsAppDirect::handleSuccess(const BinaryNode &success) {
     }
     emit connectionUpdate("open", "logged in");
     DLOG(this, "connection established as " + m_meJid);
+
+    // Publish one-time pre-keys so peers can open sessions with this device.
+    if (m_preKeys.size() < 5) ensurePreKeys(30);
+    uploadPreKeys();
 }
 
 void WhatsAppDirect::replyToIq(const BinaryNode &iq, const QString &resultTag) {
@@ -489,18 +604,141 @@ void WhatsAppDirect::replyToIq(const BinaryNode &iq, const QString &resultTag) {
     sendNode(reply);
 }
 
-// ─── Message hooks (need Signal + WAProto) ─────────────────────────────────
+// ─── Message decryption (Signal + WAProto) ─────────────────────────────────
 
 void WhatsAppDirect::handleEncryptedMessage(const BinaryNode &node) {
-    // TODO(signal): decrypt <enc> payload with the Signal session for
-    // (from, participant) using libsignal-protocol-c, then decode
-    // proto.Message with the generated WAProto and emit incomingMessage().
-    // Reference: Baileys Socket/messages-recv.js + Signal/libsignal.js.
-    const QString from = QString::fromStdString(node.attrOr("from"));
-    const QString id = QString::fromStdString(node.attrOr("id"));
-    DLOG(this, QString("encrypted message %1 from %2 - Signal decryption not "
-                       "implemented yet").arg(id, from));
-    emit messageStatus(from, id, "received-undecryptable");
+    const std::string meJid = m_meJid.toStdString();
+    wa::messaging::IncomingMessage msg;
+    std::string error;
+
+    if (!wa::messaging::decryptMessageNode(*m_store, node, meJid, msg, error)) {
+        // Baileys sends a retry receipt so the sender re-encrypts with a fresh
+        // pre-key message; we log instead (see QT_PORT.md §6).
+        DLOG(this, "undecryptable message " + QString::fromStdString(msg.id) + ": " +
+                       QString::fromStdString(error));
+        emit messageStatus(QString::fromStdString(msg.chatJid),
+                           QString::fromStdString(msg.id), "undecryptable");
+        return;
+    }
+
+    DLOG(this, "decrypted message " + QString::fromStdString(msg.id) + " in " +
+                   QString::fromStdString(msg.chatJid));
+    emit messageStatus(QString::fromStdString(msg.chatJid),
+                       QString::fromStdString(msg.id), "received");
+    if (!msg.fromMe) sendReceipt(node);   // our own echoes are not acknowledged
+
+    if (msg.hasHistorySync) {
+        downloadHistory(msg.historySync);
+        return;   // protocol messages are not shown in the chat
+    }
+
+    const Message model = messageModelFor(msg);
+    emit messageAdded(model);
+
+    QJsonObject json;
+    json["id"] = model.id;
+    json["chatJid"] = model.chatJid;
+    json["fromMe"] = model.fromMe;
+    json["senderJid"] = model.senderJid;
+    json["pushName"] = QString::fromStdString(msg.pushName);
+    json["text"] = model.text;
+    json["timestamp"] = model.timestamp;
+    json["isGroup"] = msg.isGroup;
+    emit incomingMessage(json);
+}
+
+void WhatsAppDirect::sendReceipt(const BinaryNode &node) {
+    const std::string id = node.attrOr("id");
+    const std::string from = node.attrOr("from");
+    if (id.empty() || from.empty()) return;
+
+    BinaryNode receipt("receipt");
+    receipt.setAttr("id", id);
+    receipt.setAttr("to", from);
+    const std::string participant = node.attrOr("participant");
+    if (!participant.empty()) receipt.setAttr("participant", participant);
+    sendNode(receipt);
+}
+
+Chat WhatsAppDirect::chatModelFor(const std::string &jid) const {
+    Chat chat;
+    chat.jid = QString::fromStdString(jid);
+    chat.id = chat.jid;
+    chat.isGroup = wa::isJidGroup(jid);
+    for (const auto &c : m_history.chats) {
+        if (c.jid != jid) continue;
+        chat.name = QString::fromStdString(c.name);
+        chat.unreadCount = int(c.unreadCount);
+        chat.lastMessageTs = qint64(c.lastMessageTimestamp);
+        if (!c.messages.empty()) {
+            chat.lastMessage = QString::fromStdString(c.messages.back().message.text());
+        }
+        break;
+    }
+    return chat;
+}
+
+Message WhatsAppDirect::messageModelFor(const wa::messaging::IncomingMessage &in) const {
+    Message m;
+    m.id = QString::fromStdString(in.id);
+    m.chatJid = QString::fromStdString(in.chatJid);
+    m.fromMe = in.fromMe;
+    m.senderJid = QString::fromStdString(in.senderJid);
+    m.senderName = QString::fromStdString(in.pushName);
+    m.timestamp = qint64(in.timestamp);
+    m.text = QString::fromStdString(in.text);
+    m.mediaType = QString::fromStdString(in.message.mediaType());
+    m.hasMedia = !m.mediaType.isEmpty();
+    m.status = in.fromMe ? QStringLiteral("sent") : QStringLiteral("received");
+    return m;
+}
+
+// ─── History sync ──────────────────────────────────────────────────────────
+
+void WhatsAppDirect::downloadHistory(const wa::waproto::HistorySyncNotification &note) {
+    const QString url =
+        QString::fromStdString(wa::media::urlFromDirectPath(note.directPath));
+    if (url.isEmpty() || note.mediaKey.size() != 32) {
+        DLOG(this, "history sync notification without a usable directPath/mediaKey");
+        return;
+    }
+    DLOG(this, QString("downloading history chunk %1 (%2%%)")
+                   .arg(note.chunkOrder)
+                   .arg(note.progress));
+
+    QNetworkRequest req{QUrl(url)};
+    req.setRawHeader("Origin", "https://web.whatsapp.net");
+    QNetworkReply *reply = m_net->get(req);
+    const wa::waproto::HistorySyncNotification carried = note;
+    connect(reply, &QNetworkReply::finished, this, [this, reply, carried]() {
+        const QByteArray data = reply->readAll();
+        const QString netError = reply->error() == QNetworkReply::NoError
+                                     ? QString()
+                                     : reply->errorString();
+        reply->deleteLater();
+        if (!netError.isEmpty()) {
+            DLOG(this, "history download failed: " + netError);
+            return;
+        }
+
+        wa::history::SyncData sync;
+        std::string error;
+        if (!wa::history::decode(toStd(data), carried.mediaKey, sync, error)) {
+            DLOG(this, "history decode failed: " + QString::fromStdString(error));
+            return;
+        }
+
+        m_history.merge(sync);
+        for (const auto &chat : m_history.chats) emit chatUpdated(chatModelFor(chat.jid));
+        const int chats = int(m_history.chats.size());
+        const int messages = int(m_history.messageCount());
+        DLOG(this, QString("history chunk %1 applied: %2 chats, %3 messages")
+                       .arg(carried.chunkOrder)
+                       .arg(chats)
+                       .arg(messages));
+        emit historySyncReceived(carried.progress ? int(carried.progress) : 100, chats,
+                                 messages);
+    });
 }
 
 void WhatsAppDirect::handleReceipt(const BinaryNode &node) {
@@ -530,12 +768,179 @@ void WhatsAppDirect::handlePresence(const BinaryNode &node) {
 // ─── Sending ───────────────────────────────────────────────────────────────
 
 void WhatsAppDirect::sendText(const QString &jid, const QString &text) {
-    // TODO(signal): build proto.Message {conversation:text}, encrypt per device
-    // (encryptMessage in Baileys), then send <message> with the <enc> children.
-    // Until that exists we refuse loudly instead of silently dropping messages.
-    Q_UNUSED(text)
-    const QString id = QString("3EB0%1").arg(QDateTime::currentMSecsSinceEpoch(), 0, 16);
-    emit sendResult(id, false,
-                    "direct-mode sending needs Signal sessions (see QT_PORT.md §6)");
-    DLOG(this, "sendText blocked: Signal encryption not implemented for " + jid);
+    if (!m_connected || !m_handshakeDone || m_meJid.isEmpty()) {
+        emit sendResult(QString(), false, "not connected to WhatsApp");
+        return;
+    }
+    if (jid.isEmpty()) {
+        emit sendResult(QString(), false, "no chat selected");
+        return;
+    }
+    if (wa::isJidGroup(jid.toStdString())) {
+        // Group text needs sender-key distribution (skmsg) + group metadata;
+        // see QT_PORT.md §6. Fail loudly rather than sending a broken stanza.
+        emit sendResult(QString(), false,
+                        "group sending needs sender keys (not implemented yet)");
+        return;
+    }
+
+    const QString msgId =
+        QString::fromStdString(wa::messaging::generateMessageId());
+
+    // Device bundles are cached for a few minutes (Baileys' USER_DEVICES TTL).
+    const QString userJid = QString::fromStdString(
+        wa::jidNormalizedUser(jid.toStdString()));
+    const qint64 now = QDateTime::currentMSecsSinceEpoch();
+    auto cached = m_bundleCache.find(userJid);
+    if (cached != m_bundleCache.end() &&
+        now - cached->fetchedAt < 5 * 60 * 1000 &&
+        !cached->devices.empty()) {
+        sendWithBundles(PendingSend{jid, text, msgId}, cached->devices);
+        return;
+    }
+
+    const QString iqId = QString::fromStdString(wa::messaging::generateMessageId());
+    m_pendingSends.insert(iqId, PendingSend{jid, text, msgId});
+
+    const std::vector<std::string> request{
+        jid.toStdString(), m_meJid.toStdString()};
+    const wa::BinaryNode iq =
+        wa::messaging::buildKeyRequest(iqId.toStdString(), request);
+    DLOG(this, "fetching device bundles for " + jid + "/" + m_meJid);
+    sendNode(iq);
+}
+
+// ─── Key bundles, pre-key upload ───────────────────────────────────────────
+
+void WhatsAppDirect::ensurePreKeys(int count) {
+    while (m_preKeys.size() < count) {
+        const wa::signal::KeyPair kp = wa::signal::generateKeyPair();
+        QJsonObject o;
+        o["id"] = int(m_nextPreKeyId++);
+        // Store the raw 32-byte halves; the Signal layer adds the 0x05 prefix.
+        o["priv"] = b64(toQ(kp.priv));
+        o["pub"] = b64(QByteArray(reinterpret_cast<const char *>(kp.pub.data()) + 1, 32));
+        m_preKeys.append(o);
+    }
+}
+
+void WhatsAppDirect::uploadPreKeys() {
+    if (m_meJid.isEmpty()) return;
+    ensurePreKeys(30);
+    if (m_preKeys.isEmpty()) return;
+
+    BinaryNode iq("iq");
+    iq.setAttr("id", m_meJid + "-" + QString::number(m_nextPreKeyId).toStdString());
+    iq.setAttr("type", "set");
+    iq.setAttr("xmlns", "encrypt");
+    iq.setAttr("to", "s.whatsapp.net");
+
+    // <registration> is big-endian uint32, <type> is the 0x05 key bundle type.
+    Bytes reg(4);
+    reg[0] = uint8_t(m_registrationId >> 24);
+    reg[1] = uint8_t(m_registrationId >> 16);
+    reg[2] = uint8_t(m_registrationId >> 8);
+    reg[3] = uint8_t(m_registrationId);
+    iq.addChild(BinaryNode("registration").setBytes(reg));
+    iq.addChild(BinaryNode("type").setBytes(Bytes{0x05}));
+    iq.addChild(BinaryNode("identity").setBytes(toStd(m_identityPub)));
+
+    BinaryNode list("list");
+    quint32 uploaded = m_lastUploadedPreKeyId;
+    for (const QJsonValue &v : m_preKeys) {
+        const QJsonObject o = v.toObject();
+        const quint32 id = quint32(o.value("id").toInt());
+        if (id <= m_lastUploadedPreKeyId) continue;   // already on the server
+        BinaryNode key("key");
+        key.addChild(BinaryNode("id").setBytes(Bytes{uint8_t(id >> 16), uint8_t(id >> 8),
+                                                     uint8_t(id)}));
+        key.addChild(BinaryNode("value").setBytes(toStd(fromB64(o.value("pub").toString()))));
+        list.addChild(key);
+        uploaded = qMax(uploaded, id);
+    }
+    if (!list.hasContent()) return;   // nothing new to publish
+    iq.addChild(list);
+
+    quint32 skId = m_signedPreKeyId;
+    BinaryNode skey("skey");
+    skey.addChild(BinaryNode("id").setBytes(Bytes{uint8_t(skId >> 16), uint8_t(skId >> 8),
+                                                  uint8_t(skId)}));
+    skey.addChild(BinaryNode("value").setBytes(toStd(m_signedPreKeyPub)));
+    skey.addChild(BinaryNode("signature").setBytes(toStd(m_signedPreKeySig)));
+    iq.addChild(skey);
+
+    sendNode(iq);
+    m_preKeysUploaded = true;
+    m_lastUploadedPreKeyId = uploaded;
+    saveCredentials();
+    DLOG(this, QString("uploaded one-time pre-keys up to id %1 (%2 held)")
+                   .arg(uploaded)
+                   .arg(m_preKeys.size()));
+}
+
+void WhatsAppDirect::finishSend(const QString &iqId, const wa::BinaryNode &iqNode) {
+    if (!m_pendingSends.contains(iqId)) return;
+    const PendingSend pending = m_pendingSends.take(iqId);
+
+    std::vector<wa::messaging::DeviceBundle> devices;
+    std::string error;
+    const QString userJid =
+        QString::fromStdString(wa::jidNormalizedUser(pending.jid.toStdString()));
+
+    if (!wa::messaging::parseKeyResponse(iqNode, devices, error)) {
+        emit sendResult(pending.msgId, false, QString::fromStdString(error));
+        DLOG(this, "key fetch failed for " + pending.jid + ": " +
+                       QString::fromStdString(error));
+        return;
+    } else {
+        // Never encrypt to this very device; the server echoes to others.
+        std::vector<wa::messaging::DeviceBundle> filtered;
+        for (const auto &d : devices) {
+            if (QString::fromStdString(d.jid) == m_meJid) continue;
+            filtered.push_back(d);
+        }
+        devices.swap(filtered);
+        m_bundleCache.insert(userJid, CachedBundles{QDateTime::currentMSecsSinceEpoch(),
+                                                    devices});
+    }
+
+    sendWithBundles(pending, devices);
+}
+
+void WhatsAppDirect::sendWithBundles(const PendingSend &pending,
+                                     std::vector<wa::messaging::DeviceBundle> devices) {
+    std::string error;
+    if (devices.empty()) {
+        emit sendResult(pending.msgId, false, "no reachable devices for " + pending.jid);
+        return;
+    }
+
+    wa::messaging::SendPlan plan;
+    if (!wa::messaging::buildTextStanza(*m_store, m_meJid.toStdString(),
+                                        pending.jid.toStdString(),
+                                        pending.text.toStdString(),
+                                        pending.msgId.toStdString(), devices, plan,
+                                        error)) {
+        emit sendResult(pending.msgId, false, QString::fromStdString(error));
+        DLOG(this, "encrypt failed for " + pending.jid + ": " +
+                       QString::fromStdString(error));
+        return;
+    }
+
+    sendNode(plan.stanza);
+    DLOG(this, QString("sent %1 to %2 device(s)%3")
+                   .arg(pending.msgId)
+                   .arg(plan.deviceCount)
+                   .arg(plan.usedPreKey ? " (pre-key message)" : ""));
+    emit sendResult(pending.msgId, true, QString());
+
+    Message echo;
+    echo.id = pending.msgId;
+    echo.chatJid = pending.jid;
+    echo.fromMe = true;
+    echo.senderJid = m_meJid;
+    echo.text = pending.text;
+    echo.timestamp = QDateTime::currentDateTimeUtc().toSecsSinceEpoch();
+    echo.status = QStringLiteral("sent");
+    emit messageAdded(echo);
 }

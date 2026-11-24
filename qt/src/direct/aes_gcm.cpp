@@ -358,6 +358,24 @@ Bytes aes256CbcEncrypt(const Bytes &plaintext, const Bytes &key, const Bytes &iv
     return out;
 }
 
+bool aes256CbcDecryptRaw(const Bytes &ciphertext, const Bytes &key,
+                         const Bytes &iv, Bytes &plaintext) {
+    if (iv.size() != 16 || ciphertext.empty() || ciphertext.size() % 16 != 0) return false;
+    const Aes256 aes(key);
+
+    Bytes out(ciphertext.size());
+    uint8_t prev[16];
+    std::memcpy(prev, iv.data(), 16);
+    for (size_t off = 0; off < ciphertext.size(); off += 16) {
+        uint8_t dec[16];
+        aes.decryptBlock(ciphertext.data() + off, dec);
+        for (int i = 0; i < 16; i++) out[off + i] = uint8_t(dec[i] ^ prev[i]);
+        std::memcpy(prev, ciphertext.data() + off, 16);
+    }
+    plaintext = out;
+    return true;
+}
+
 bool aes256CbcDecrypt(const Bytes &ciphertext, const Bytes &key,
                       const Bytes &iv, Bytes &plaintext) {
     if (iv.size() != 16 || ciphertext.empty() || ciphertext.size() % 16 != 0) return false;

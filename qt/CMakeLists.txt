@@ -27,6 +27,13 @@ add_executable(openknot-qt
   src/direct/sha256.cpp
   src/direct/x25519.cpp
   src/direct/aes_gcm.cpp
+  # Signal protocol, WAProto subset, media crypto, history + message layer
+  src/direct/ed25519.cpp
+  src/direct/signal.cpp
+  src/direct/wa_proto.cpp
+  src/direct/media_crypto.cpp
+  src/direct/wa_history.cpp
+  src/direct/wa_message.cpp
 )
 
 target_include_directories(openknot-qt PRIVATE src src/direct)
@@ -40,9 +47,9 @@ else()
 endif()
 
 # The direct-mode stack is dependency-free on purpose: Noise, X25519,
-# AES-256-GCM, HKDF and raw DEFLATE are all implemented in src/direct/, so the
-# app needs no libsodium/zlib/protobuf. Only libsignal-protocol-c will be an
-# additional dependency once Signal sessions are implemented (QT_PORT.md §6).
+# AES-256-GCM, HKDF, raw DEFLATE, Ed25519/XEdDSA, the Signal double ratchet,
+# the WAProto subset and WhatsApp media crypto are all implemented in
+# src/direct/, so the app needs no libsodium/zlib/protobuf/libsignal.
 #
 # Qt 4.7 (Symbian) note: QWebSocket does not exist before Qt 5.4, so direct
 # mode needs the QTcpSocket transport described in QT_PORT.md §5. Proxy mode
@@ -62,6 +69,30 @@ set(DIRECT_CORE
   src/direct/proto_min.cpp
 )
 
+add_executable(test_ed25519 tests/test_ed25519.cpp src/direct/ed25519.cpp src/direct/x25519.cpp src/direct/sha256.cpp)
+target_include_directories(test_ed25519 PRIVATE src/direct)
+
+add_executable(test_signal tests/test_signal.cpp
+  src/direct/signal.cpp src/direct/ed25519.cpp ${DIRECT_CORE})
+target_include_directories(test_signal PRIVATE src/direct)
+
+add_executable(test_wa_proto tests/test_wa_proto.cpp src/direct/wa_proto.cpp src/direct/proto_min.cpp)
+target_include_directories(test_wa_proto PRIVATE src/direct)
+
+add_executable(test_history tests/test_history.cpp
+  src/direct/wa_history.cpp src/direct/media_crypto.cpp src/direct/wa_proto.cpp
+  src/direct/binary_node.cpp src/direct/inflate.cpp ${DIRECT_CORE})
+target_include_directories(test_history PRIVATE src/direct)
+
+add_executable(test_message tests/test_message.cpp
+  src/direct/wa_message.cpp src/direct/wa_proto.cpp src/direct/signal.cpp
+  src/direct/ed25519.cpp src/direct/binary_node.cpp src/direct/inflate.cpp ${DIRECT_CORE})
+target_include_directories(test_message PRIVATE src/direct)
+# test_message runs three times (C++ encrypt -> Node/libsignal -> C++ decrypt),
+# so it is driven by tests/run_tests.sh; here we only add the first phase.
+add_test(NAME message_build COMMAND test_message
+  ${CMAKE_CURRENT_SOURCE_DIR}/tests/message_vectors.txt ${CMAKE_CURRENT_BINARY_DIR})
+
 add_executable(test_codec tests/test_codec.cpp src/direct/binary_node.cpp src/direct/inflate.cpp)
 target_include_directories(test_codec PRIVATE src/direct)
 
@@ -74,7 +105,8 @@ target_include_directories(test_proto PRIVATE src/direct)
 add_executable(test_noise tests/test_noise.cpp src/direct/noise.cpp ${DIRECT_CORE})
 target_include_directories(test_noise PRIVATE src/direct)
 
-foreach(tc test_codec test_crypto test_proto test_noise)
+foreach(tc test_codec test_crypto test_proto test_noise test_ed25519 test_signal
+          test_wa_proto test_history test_message)
   target_compile_options(${tc} PRIVATE -Wall -Wextra)
 endforeach()
 
@@ -82,3 +114,7 @@ add_test(NAME codec COMMAND test_codec ${CMAKE_CURRENT_SOURCE_DIR}/tests/vectors
 add_test(NAME crypto COMMAND test_crypto ${CMAKE_CURRENT_SOURCE_DIR}/tests/crypto_vectors.txt)
 add_test(NAME proto COMMAND test_proto ${CMAKE_CURRENT_SOURCE_DIR}/tests/proto_vectors.txt)
 add_test(NAME noise COMMAND test_noise ${CMAKE_CURRENT_SOURCE_DIR}/tests/noise_vectors.txt)
+add_test(NAME ed25519 COMMAND test_ed25519 ${CMAKE_CURRENT_SOURCE_DIR}/tests/sig_vectors.txt)
+add_test(NAME wa_proto COMMAND test_wa_proto ${CMAKE_CURRENT_SOURCE_DIR}/tests/wa_proto_vectors.txt)
+add_test(NAME history COMMAND test_history ${CMAKE_CURRENT_SOURCE_DIR}/tests/history_vectors.txt)
+# signal / message need libsignal on the Node side: use tests/run_tests.sh

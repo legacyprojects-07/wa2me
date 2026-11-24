@@ -189,20 +189,40 @@ Implemented **and verified byte-for-byte against Baileys 6.7.22** (see
 - ✅ Full connect flow: ClientHello → ServerHello → ClientFinish → `finishInit`,
   QR pairing stanza, `<success>`/`<failure>`/`<stream:error>`, keepalive,
   reconnect, creds persistence
+- ✅ **Signal Protocol, hand-written** (`src/direct/signal.cpp`): X3DH, Double
+  Ratchet, WhisperTextProtocol messages — interops with libsignal in *both*
+  directions (18/18 + 16/16 checks; libsignal decrypts our ciphertext and we
+  decrypt its replies)
+- ✅ **XEdDSA pre-key signatures + Ed25519** (`src/direct/ed25519.cpp`):
+  31/31 against curve25519-js / Node crypto
+- ✅ **WAProto subset** (`src/direct/wa_proto.cpp`): `Message`,
+  `WebMessageInfo`, `HistorySync`, `HistorySyncNotification`, `MessageKey`,
+  `ContextInfo`, media metadata, `deviceSentMessage` — encode **and** decode
+  byte-identical to protobufjs (58/58)
+- ✅ **Media / history crypto** (`src/direct/media_crypto.cpp`): HKDF
+  `"WhatsApp <Type> Keys"` → AES-256-CBC + 10-byte HMAC, and a zlib wrapper on
+  the DEFLATE decoder: 59/59, including a real encrypted `HistorySync` blob
+- ✅ **Message layer** (`src/direct/wa_message.cpp`): pre-key bundle parsing
+  from the real `<iq xmlns=encrypt>` node, per-device `pkmsg`/`msg`
+  encryption, `<participants>` assembly, `deviceSentMessage` wrapping, and
+  incoming decrypt + routing (18/18 decrypt checks, 29/29 build checks, with
+  libsignal on the other end)
+- ✅ **Send + history wired into the app**: one-time pre-key generation and
+  upload, device-bundle fetch + 5-minute cache, text send, receipts, and
+  `HistorySync` download → decrypt → inflate → parse → chat list
 
-Still missing (all call sites marked):
+Still missing:
 
-- ⚠️ `TODO(signal)` — Signal sessions (X3DH + Double Ratchet, sender keys for
-  groups) via libsignal-protocol-c: message send/receive bodies
-- ⚠️ `TODO(proto)` — generated WAProto for `Message`, `HistorySync`,
-  app-state patch/snapshot, USync
-- ⚠️ Media CDN upload/download (AES-CBC + HMAC: primitives already present)
+- ⚠️ **Group messages** (`skmsg`): sender-key distribution, group metadata
+  fetch. Direct-mode group *sending* reports a clear error instead of sending
+  a broken stanza; incoming group pre-key/whisper messages decrypt fine.
+- ⚠️ Media upload/download in the UI (the crypto primitives and URL builder are
+  in place; only the HTTP + thumbnail pipeline is missing).
+- ⚠️ App state (mute/pin/archive), presence privacy, USync device lists
+  (bundles are fetched per send instead).
 
-**Honest estimate:** proxy mode is done, and direct mode's entire transport
-layer is done + tested. What remains (Signal + WAProto + media) is the bulk of
-a Baileys port — several weeks of focused C++ work. Direct mode will pair and
-stay connected today, but it will not read or send message bodies until those
-land.
+**Honest estimate:** direct mode now *sends text and loads chat history*; what
+remains is groups, media and app state.
 
 ## 4. Why not just "port wa.js line by line"?
 
@@ -218,9 +238,9 @@ The mapping table below is the work breakdown.
 | `src/WABinary/{encode,decode,constants}.ts`, `jid-utils.ts` | `direct/binary_node.*`, `wa_tokens.h` | **ported + tested** |
 | zlib raw inflate (compressed frames) | `direct/inflate.*` | **implemented + tested** |
 | `proto.HandshakeMessage`, `ClientPayload`, `DeviceProps` | `direct/proto_min.*` | **ported + tested** |
-| `src/WABinary/proto/*.proto` (Message, HistorySync, …) → `protoc` | generated `wa_proto.pb.*` | TODO(proto) |
-| `src/Signal/libsignal.ts`, `auth-utils.ts` | libsignal-protocol-c wrapper + XEdDSA | TODO(signal) |
-| `src/Utils/history-sync.ts` | `HistorySync` handler + `QtSql` store | TODO(proto) |
+| `src/WABinary/proto/*.proto` (Message, HistorySync, …) → `protoc` | hand-written `wa_proto.cpp` subset | done (subset) |
+| `src/Signal/libsignal.ts`, `auth-utils.ts` | `signal.cpp` (X3DH + ratchet) + `ed25519.cpp` (XEdDSA) | done (1:1) |
+| `src/Utils/history-sync.ts` | `wa_history.cpp` + `media_crypto.cpp` | done |
 | `src/Utils/messages-media.ts` | media AES-CBC/HMAC + CDN fetch (`aes_gcm.*` ready) | TODO |
 | `src/Utils/usync.ts`, `app-state.ts` | USync / app-state handlers | TODO |
 | `wa.js` (your code) | `MainWindow` + `ApiClient`/`WhatsAppDirect` | **ported (proxy)** |
@@ -257,16 +277,21 @@ mode works on desktop, back-port the WebSocket + crypto layers to Symbian.
 - [x] **Phase 2 — Direct transport**: dependency-free Noise handshake +
       `QWebSocket` to `wss://web.whatsapp.com`, QR pairing, reconnect.
       Verified against Baileys by the suites in `qt/tests/`.
-- [ ] **Phase 3 — Direct crypto**: libsignal-protocol-c sessions + XEdDSA
-      pre-key signatures; BinaryNode + protobuf send/recv of text messages.
-- [ ] **Phase 4 — Direct sync + media**: WAProto `Message`/`HistorySync`,
-      USync, `QtSql` store, media upload/download, groups, presence.
+- [x] **Phase 3 — Direct crypto**: hand-written Signal (X3DH + Double Ratchet),
+      XEdDSA pre-key signatures, WAProto `Message`, 1:1 text send/receive.
+      Verified against libsignal and protobufjs.
+- [x] **Phase 3b — Direct history**: `HistorySync` notification → CDN download →
+      media-key decrypt → inflate → parse → chats/messages in the UI.
+- [ ] **Phase 4 — Groups + media + app state**: sender-key (`skmsg`) groups,
+      group metadata, media upload/download, app state patches, USync device
+      lists, `QtSql` store.
 - [ ] **Phase 5 — Symbian back-port**: Qt4 HTTP shim (done in Phase 1),
       custom RFC 6455 WebSocket + cross-compiled libsignal for direct mode.
 
 ## 8. Verification
 
 `qt/tests/run_tests.sh` compiles the Qt-free protocol code with the host g++
+(set `BAILEYS_DIR` to run the libsignal interop phases as well).
 and checks it against vectors generated from the real Baileys package and
 Node's `crypto`:
 
@@ -276,6 +301,11 @@ Node's `crypto`:
 | `test_crypto` | SHA-256/HMAC/HKDF, X25519 (incl. RFC 7748), AES-256-GCM (+tampering rejected), AES-256-CBC |
 | `test_proto` | `ClientHello`, `ServerHello` decode, `ClientFinish`, `DeviceProps`, registration + login `ClientPayload` identical to protobufjs |
 | `test_noise` | the full Noise key schedule produces the same ciphertexts as Baileys' `NoiseHandler`, plus frame header/split/coalesce handling |
+| `test_ed25519` | SHA-512 and XEdDSA signatures are byte-identical to curve25519-js, both verify, tampering and bad signatures are rejected |
+| `test_signal` | X3DH/Double Ratchet: libsignal decrypts our `PreKeyWhisperMessage` and we decrypt its replies (two-phase Node run) |
+| `test_wa_proto` | `Message`/`HistorySync`/`HistorySyncNotification` encode **and** decode match protobufjs byte-for-byte, including padding round-trips |
+| `test_history` | a real Baileys-produced `HistorySync` blob decrypts (HKDF + AES-CBC + 10-byte HMAC), inflates through the zlib wrapper and flattens into chats/messages/pushnames |
+| `test_message` | full message layer: parse the real `<iq xmlns=encrypt>` bundle node, build a `<message>` stanza, libsignal decrypts it (text + `deviceSentMessage`), and C++ decrypts libsignal's `pkmsg`/`msg` replies into the right chat |
 
 Regenerate the vectors after a Baileys bump:
 

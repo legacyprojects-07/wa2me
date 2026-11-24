@@ -253,3 +253,59 @@ bool inflateRaw(const uint8_t *data, size_t len, std::vector<uint8_t> &out, size
 
 } // namespace binary
 } // namespace wa
+
+namespace wa {
+namespace binary {
+
+namespace {
+
+uint32_t adler32(const std::vector<uint8_t> &data) {
+    uint32_t a = 1, b = 0;
+    for (uint8_t c : data) {
+        a = (a + c) % 65521u;
+        b = (b + a) % 65521u;
+    }
+    return (b << 16) | a;
+}
+
+} // namespace
+
+bool inflateZlib(const uint8_t *data, size_t len, std::vector<uint8_t> &out,
+                 size_t maxOutput) {
+    out.clear();
+    if (len < 2) return false;
+    const uint8_t cmf = data[0], flg = data[1];
+    if ((cmf & 0x0f) != 8) return false;                  // method must be deflate
+    if (((uint32_t(cmf) << 8) | flg) % 31u != 0) return false;  // header checksum
+    if (flg & 0x20) return false;                         // preset dictionary unsupported
+
+    // Skip the header; the raw stream ends before the 4-byte Adler-32 trailer.
+    size_t bodyLen = len - 2;
+    size_t trailer = bodyLen >= 4 ? 4 : 0;
+    if (!inflateRaw(data + 2, bodyLen - trailer, out, maxOutput)) {
+        // Some producers omit the trailer; retry with the extra bytes allowed.
+        if (!trailer || !inflateRaw(data + 2, bodyLen, out, maxOutput)) {
+            out.clear();
+            return false;
+        }
+        return true;
+    }
+    if (trailer) {
+        const uint8_t *t = data + len - 4;
+        const uint32_t want = (uint32_t(t[0]) << 24) | (uint32_t(t[1]) << 16) |
+                              (uint32_t(t[2]) << 8) | uint32_t(t[3]);
+        if (adler32(out) != want) {
+            out.clear();
+            return false;
+        }
+    }
+    return true;
+}
+
+bool inflateZlib(const std::vector<uint8_t> &data, std::vector<uint8_t> &out,
+                 size_t maxOutput) {
+    return inflateZlib(data.data(), data.size(), out, maxOutput);
+}
+
+} // namespace binary
+} // namespace wa

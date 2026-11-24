@@ -72,12 +72,25 @@ src/
     x25519.*            Curve25519 ECDH
     aes_gcm.*           AES-256-GCM / CBC / CTR
     proto_min.*         handshake protobuf (HandshakeMessage, ClientPayload, …)
+    ed25519.*           SHA-512 / Ed25519 / XEdDSA (Signal signatures)
+    signal.*            Signal Protocol: X3DH + Double Ratchet (libsignal port)
+    wa_proto.*          WAProto subset: Message, HistorySync, notifications
+    media_crypto.*      WhatsApp media keys + AES-CBC/HMAC blob crypto
+    wa_history.*        HistorySync decrypt → inflate → parse → chats
+    wa_message.*        pre-key bundles, <message> build/parse, deviceSent
 tests/
-  run_tests.sh          builds + runs all four core suites with host g++
+  run_tests.sh          builds + runs every core suite with host g++
   test_codec.cpp        BinaryNode codec + DEFLATE, vs real Baileys bytes
   test_crypto.cpp       SHA/HMAC/HKDF/X25519/AES-GCM/CBC vs Node crypto
   test_proto.cpp        handshake protobuf encoders vs protobufjs output
   test_noise.cpp        Noise key schedule vs the real Baileys NoiseHandler
+  test_ed25519.cpp      SHA-512 / XEdDSA vs curve25519-js
+  test_signal.cpp       Signal sessions, interop with libsignal (3 phases)
+  test_wa_proto.cpp     Message/HistorySync vs protobufjs, both directions
+  test_history.cpp      real encrypted HistorySync blob → chats/messages
+  test_message.cpp      <message> stanza build/parse, interop with libsignal
+  verify_signal.mjs     phase 2 of test_signal (decrypts/encrypts via libsignal)
+  verify_message.mjs    phase 2 of test_message (decodes the stanza, replies)
   gen_*.mjs             regenerate the vectors from Baileys (`--regen`)
   *_vectors.txt         checked-in vectors (Baileys 6.7.22)
 ```
@@ -89,6 +102,8 @@ installing Qt:
 
 ```bash
 ./qt/tests/run_tests.sh
+# or, including the libsignal interop phases:
+BAILEYS_DIR=/path/to/node_modules/@whiskeysockets/baileys ./qt/tests/run_tests.sh
 ```
 
 ```
@@ -96,9 +111,18 @@ installing Qt:
 === raw DEFLATE ===        inflateRaw vs Node zlib      : 6 passed
 === compressed frames ===  flag-0x02 frame decode       : 9 passed
 === crypto ===             55 checks, 0 failed
-=== protobuf ===           10 checks, 0 failed
+=== handshake protobuf === 10 checks, 0 failed
 === Noise transport ===    15 checks, 0 failed
+=== Ed25519 / XEdDSA ===   31 checks, 0 failed
+=== WAProto ===            58 checks, 0 failed
+=== history / media ===    59 checks, 0 failed
+=== Signal (vs libsignal) ===       16 + 18 checks, 0 failed
+=== message layer (vs libsignal) === 29 + 18 checks, 0 failed
 ```
+
+The Signal and message suites are three-phase: the C++ side encrypts, a Node
+script driving the real libsignal decrypts (and replies), then C++ decrypts the
+reply. Set `BAILEYS_DIR` to include them.
 
 Every vector is produced by the actual `@whiskeysockets/baileys@6.7.22` code or
 Node's `crypto`, not copied by hand. Regenerate with:
@@ -111,13 +135,21 @@ BAILEYS_DIR=/path/to/node_modules/@whiskeysockets/baileys \
 ## What works, what doesn't (direct mode)
 
 Working: websocket connect (`wss://web.whatsapp.com/ws/chat`, browser Origin +
-UA), Noise XX handshake with the real key schedule, frame framing and
-compressed-frame decoding, QR pairing stanza handling, `<success>`/`<failure>`/
-`<stream:error>` handling, keepalive pings, presence/chatstate/receipt signals,
-credential persistence and 5-second reconnect.
+UA), Noise XX handshake, frame framing and compressed-frame decoding, QR
+pairing, `<success>`/`<failure>`/`<stream:error>`, keepalive pings,
+presence/chatstate/receipt signals, credential persistence, 5-second reconnect
+— **plus, with no external crypto libraries at all**:
 
-Missing (and why): Signal (X3DH + Double Ratchet) message encryption needs
-libsignal-protocol-c, and `Message`/`HistorySync` decoding needs the generated
-WAProto. Until both are in, direct mode pairs and stays connected but cannot
-read or send message bodies — every call site is marked `TODO(signal)` /
-`TODO(proto)` and listed in `QT_PORT.md` §6.
+- **Sending text** (1:1): one-time pre-key upload, `<iq xmlns=encrypt>` device
+  bundle fetch (cached 5 min), Signal encryption per device (`pkmsg` first,
+  `msg` afterwards), `deviceSentMessage` copies for our own devices, receipts.
+- **Receiving text** (1:1): `<enc>` decryption, PKCS#7-ish unpadding, `Message`
+  decoding, `deviceSentMessage` unwrapping, chat-routing, read/delivery
+  receipts.
+- **History sync**: `HistorySyncNotification` → CDN download → media-key
+  decrypt (HKDF + AES-256-CBC + HMAC) → inflate → `HistorySync` parse →
+  chats, messages and pushnames in the chat list.
+
+Missing: groups (`skmsg` sender keys + group metadata), media upload/download
+in the UI, app state (mute/pin/archive), USync device lists (bundles are
+fetched per send). See `QT_PORT.md` §3 and §6.

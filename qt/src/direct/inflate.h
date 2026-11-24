@@ -23,5 +23,14 @@ namespace binary {
 bool inflateRaw(const uint8_t *data, size_t len, std::vector<uint8_t> &out,
                 size_t maxOutput = 64u * 1024u * 1024u);
 
+// zlib-wrapped DEFLATE (RFC 1950), which is what HistorySync blobs and
+// zlib.deflateSync() produce: 2-byte header, raw DEFLATE stream, Adler-32.
+// The Adler-32 trailer is checked when complete (a truncated trailer is
+// tolerated, mirroring zlib's streaming behaviour for our use).
+bool inflateZlib(const uint8_t *data, size_t len, std::vector<uint8_t> &out,
+                 size_t maxOutput = 64u * 1024u * 1024u);
+bool inflateZlib(const std::vector<uint8_t> &data, std::vector<uint8_t> &out,
+                 size_t maxOutput = 64u * 1024u * 1024u);
+
 } // namespace binary
 } // namespace wa

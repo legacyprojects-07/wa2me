@@ -54,6 +54,13 @@ MainWindow::MainWindow(QWidget *parent) : QMainWindow(parent) {
             [this](const QString &id, bool ok, const QString &error) {
                 if (!ok) appendLog(QString("[direct] send %1 failed: %2").arg(id, error));
             });
+    connect(m_direct, &WhatsAppDirect::chatUpdated, this, &MainWindow::onDirectChat);
+    connect(m_direct, &WhatsAppDirect::messageAdded, this, &MainWindow::onDirectMessage);
+    connect(m_direct, &WhatsAppDirect::historySyncReceived, this,
+            [this](int progress, int chats, int messages) {
+                statusBar()->showMessage(QString("History sync %1% — %2 chats, %3 messages")
+                                             .arg(progress).arg(chats).arg(messages), 4000);
+            });
 
     buildUi();
     buildActions();
@@ -180,8 +187,8 @@ void MainWindow::scheduleSyncPoll() {
 
 void MainWindow::refreshChats() {
     if (m_directMode) {
-        appendLog("[direct] chat list comes from history sync, which needs WAProto "
-                  "(see QT_PORT.md §6)");
+        // Direct mode fills m_chats from history sync notifications.
+        onChatsReady(m_chats);
         return;
     }
     m_api->getChats(200, 0, false);
@@ -225,7 +232,8 @@ void MainWindow::onChatSelected() {
     const QString jid = currentJid();
     if (jid.isEmpty()) return;
     if (m_directMode) {
-        appendLog("[direct] message history for " + jid + " needs Signal/WAProto");
+        // History for this chat arrived with the sync chunks.
+        renderMessages();
         return;
     }
     if (!m_messages.contains(jid)) {
@@ -294,7 +302,7 @@ void MainWindow::sendCurrentMessage() {
 
     if (m_directMode) {
         m_direct->sendText(jid, text);
-        appendLog("[direct] send requires Signal sessions — see QT_PORT.md §6");
+        m_input->clear();
         return;
     }
     m_api->sendText(jid, text);
@@ -424,10 +432,62 @@ void MainWindow::onDirectConnection(const QString &state, const QString &reason)
 
 void MainWindow::onDirectLog(const QString &line) { appendLog(line); }
 
+// A chat arrived from history sync: merge it and refresh the list.
+void MainWindow::onDirectChat(const Chat &chat) {
+    bool replaced = false;
+    for (int i = 0; i < m_chats.size(); ++i) {
+        if (m_chats[i].jid != chat.jid) continue;
+        Chat merged = chat;
+        if (merged.name.isEmpty()) merged.name = m_chats[i].name;
+        m_chats[i] = merged;
+        replaced = true;
+        break;
+    }
+    if (!replaced) m_chats.append(chat);
+
+    // Rebuild without losing the selection.
+    const QString selected = currentJid();
+    onChatsReady(m_chats);
+    if (!selected.isEmpty() && m_chatItems.contains(selected))
+        m_chatItems.value(selected)->setSelected(true);
+}
+
+// A live message (incoming, or our own echo) for the open chat.
+void MainWindow::onDirectMessage(const Message &message) {
+    QList<Message> &list = m_messages[message.chatJid];
+    for (const Message &existing : list) {
+        if (existing.id == message.id) return;   // already rendered
+    }
+    list.append(message);
+
+    // First traffic from an unknown chat: add it to the list too.
+    bool known = false;
+    for (const Chat &c : m_chats) {
+        if (c.jid == message.chatJid) { known = true; break; }
+    }
+    if (!known) {
+        Chat chat;
+        chat.jid = message.chatJid;
+        chat.id = chat.jid;
+        chat.isGroup = message.chatJid.endsWith("@g.us");
+        chat.name = message.senderName;
+        chat.lastMessage = message.text;
+        chat.lastMessageTs = message.timestamp;
+        onDirectChat(chat);
+    }
+
+    if (message.chatJid == currentJid()) renderMessages();
+}
+
 // ─── Misc ─────────────────────────────────────────────────────────────────
 
 void MainWindow::toggleDirectMode(bool on) {
     m_directMode = on;
+    m_chats.clear();
+    m_messages.clear();
+    m_chatItems.clear();
+    m_chatList->clear();
+    m_view->setHtml(QString());
     applyMode();
     if (on) {
         m_direct->connectToWhatsApp();
