@@ -30,6 +30,8 @@ std::string extensionOf(const std::string &name) {
 
 // ── Media connection ─────────────────────────────────────────────────────
 
+// Same shape Baileys sends (lib/Socket/messages-send.js refreshMediaConn):
+// <iq type=set xmlns=w:m to=s.whatsapp.net id=…><media_conn/></iq>
 BinaryNode buildMediaConnRequest(const std::string &id) {
     BinaryNode iq("iq");
     iq.setAttr("id", id);
