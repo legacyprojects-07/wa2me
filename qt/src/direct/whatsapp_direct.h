@@ -81,8 +81,10 @@ public slots:
     // (media_conn -> upload URL), then send an image/video/audio/document
     // message carrying url + directPath + mediaKey + hashes. Groups use the
     // sender-key path like text does.
+    // `voiceNote` sends audio as a push-to-talk message (ptt=true, duration
+    // read from the Ogg granule position) — the "voice note" media template.
     void sendMedia(const QString &jid, const QString &filePath,
-                   const QString &caption = QString());
+                   const QString &caption = QString(), bool voiceNote = false);
 
     // Media download: fetch the message's CDN url, verify + decrypt it and
     // write `savePath`. Reports through mediaSaved()/mediaFailed().

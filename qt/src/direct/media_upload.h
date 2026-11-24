@@ -87,6 +87,11 @@ struct MediaMeta {
     uint32_t width = 0;
 };
 
+// Duration of an Ogg/Opus file in seconds, read from the last Ogg page's
+// granule position (48 kHz). Voice notes need it; returns false when the file
+// is not Ogg or has no readable page.
+bool oggOpusDuration(const Bytes &file, int &seconds);
+
 // Fills the right field of `msg` (image/video/audio/document/sticker).
 void fillMediaMessage(Type type, const UploadedMedia &uploaded, const MediaMeta &meta,
                       waproto::Message &msg);

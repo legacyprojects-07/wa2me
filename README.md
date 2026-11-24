@@ -22,7 +22,8 @@ itself instead of going through this backend.
   itself: Noise handshake, BinaryNode codec, QR pairing, keepalive, reconnect,
   **Signal-encrypted text send/receive (1:1 and groups)**, **group
   administration** (create/join/leave/participants/subject/description/invite),
-  **media upload/download** and **chat history sync**. The whole stack — RFC 6455
+  **media upload/download** (image, video, audio, document, sticker, voice
+  note) and **chat history sync**. The whole stack — RFC 6455
   WebSocket, Noise, X25519, AES-GCM/CBC, HKDF, DEFLATE, Ed25519/XEdDSA, the
   Signal double ratchet, group sender keys, the WAProto subset and WhatsApp
   media crypto — is hand-written with **no libsodium, zlib, protobuf, libsignal

@@ -109,6 +109,8 @@ std::string mediaPath(Type type) {
     case Type::Document:
     case Type::DocumentThumbnail:
         return "/mms/document";
+    case Type::Sticker:
+        return "/mms/image";   // MEDIA_PATH_MAP.sticker = /mms/image
     case Type::History:
         return "/mms/md-app-state";
     case Type::AppState:
@@ -183,6 +185,35 @@ void copyCommon(const UploadedMedia &u, waproto::MediaInfo &info) {
 
 } // namespace
 
+bool oggOpusDuration(const Bytes &file, int &seconds) {
+    seconds = 0;
+    if (file.size() < 28) return false;
+    size_t pos = 0;
+    uint64_t granule = 0;
+    bool sawPage = false;
+    const uint64_t kNoGranule = ~uint64_t(0);
+    while (pos + 27 <= file.size()) {
+        if (!(file[pos] == 'O' && file[pos + 1] == 'g' && file[pos + 2] == 'g' &&
+              file[pos + 3] == 'S'))
+            break;
+        uint64_t pageGranule = 0;
+        for (int i = 7; i >= 0; --i) pageGranule = (pageGranule << 8) | file[pos + 6 + i];
+        const size_t segments = file[pos + 26];
+        const size_t tableEnd = pos + 27 + segments;
+        if (tableEnd > file.size()) break;
+        size_t payload = 0;
+        for (size_t i = 0; i < segments; ++i) payload += file[pos + 27 + i];
+        if (tableEnd + payload > file.size()) break;
+        if (pageGranule != kNoGranule) granule = pageGranule;
+        sawPage = true;
+        pos = tableEnd + payload;
+    }
+    if (!sawPage) return false;
+    // Opus granule positions count 48 kHz samples.
+    seconds = int((granule + 47999) / 48000);
+    return true;
+}
+
 void fillMediaMessage(Type type, const UploadedMedia &uploaded, const MediaMeta &meta,
                       waproto::Message &msg) {
     switch (type) {
@@ -227,6 +258,14 @@ void fillMediaMessage(Type type, const UploadedMedia &uploaded, const MediaMeta 
         info.pageCount = 1;
         break;
     }
+    case Type::Sticker: {
+        waproto::MediaInfo &info = msg.sticker;
+        copyCommon(uploaded, info);
+        info.mimetype = meta.mimetype.empty() ? "image/webp" : meta.mimetype;
+        info.height = meta.height;
+        info.width = meta.width;
+        break;
+    }
     case Type::PaymentBackground:
     case Type::History:
     case Type::AppState: {
@@ -244,7 +283,7 @@ bool mediaInfoOf(const waproto::Message &msg, Type &typeOut, waproto::MediaInfo 
     if (!msg.video.empty()) { typeOut = Type::Video; infoOut = msg.video; return true; }
     if (!msg.audio.empty()) { typeOut = Type::Audio; infoOut = msg.audio; return true; }
     if (!msg.document.empty()) { typeOut = Type::Document; infoOut = msg.document; return true; }
-    if (!msg.sticker.empty()) { typeOut = Type::Image; infoOut = msg.sticker; return true; }
+    if (!msg.sticker.empty()) { typeOut = Type::Sticker; infoOut = msg.sticker; return true; }
     return false;
 }
 
@@ -278,6 +317,9 @@ std::string mimeForFileName(const std::string &fileName) {
 
 Type typeForMime(const std::string &mime, const std::string &fileName) {
     const std::string m = lower(mime);
+    // WhatsApp stickers are WebP; the extension decides, since .webp photos
+    // and stickers share the MIME type and the UI sends both.
+    if (extensionOf(fileName) == "webp") return Type::Sticker;
     if (m.rfind("image/", 0) == 0) return Type::Image;
     if (m.rfind("video/", 0) == 0) return Type::Video;
     if (m.rfind("audio/", 0) == 0) return Type::Audio;
@@ -305,6 +347,8 @@ std::string suggestedFileName(const waproto::Message &msg, Type type) {
         return "video.mp4";
     case Type::Audio:
         return msg.audio.ptt ? "voice-note.ogg" : "audio.ogg";
+    case Type::Sticker:
+        return "sticker.webp";
     case Type::Document:
     case Type::DocumentThumbnail:
         return msg.document.fileName.empty() ? std::string("document") : msg.document.fileName;

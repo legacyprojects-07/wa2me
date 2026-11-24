@@ -161,6 +161,9 @@ void MainWindow::buildActions() {
     QAction *attachAction = fileMenu->addAction("Send file…");
     connect(attachAction, SIGNAL(triggered()), this, SLOT(attachFile()));
 
+    QAction *voiceAction = fileMenu->addAction("Send voice note…");
+    connect(voiceAction, SIGNAL(triggered()), this, SLOT(sendVoiceNote()));
+
     QAction *saveMediaAction = fileMenu->addAction("Save media from chat…");
     connect(saveMediaAction, SIGNAL(triggered()), this, SLOT(saveMedia()));
 
@@ -430,6 +433,25 @@ void MainWindow::attachFile() {
 }
 
 // Downloads the newest media message of the current chat.
+void MainWindow::sendVoiceNote() {
+    const QString jid = currentJid();
+    if (jid.isEmpty()) {
+        QMessageBox::information(this, "No chat", "Select a chat first.");
+        return;
+    }
+    const QString path = QFileDialog::getOpenFileName(
+        this, "Send voice note", QString(),
+        "Voice notes (*.ogg *.opus *.oga);;Audio files (*.mp3 *.m4a *.aac *.wav)");
+    if (path.isEmpty()) return;
+    const QString caption;   // voice notes carry no caption
+    if (m_directMode) {
+        m_direct->sendMedia(jid, path, caption, true);
+    } else {
+        m_api->sendMedia(jid, path, "audio", caption, QString(), true);
+    }
+    statusBar()->showMessage("Sending voice note…", 4000);
+}
+
 void MainWindow::saveMedia() {
     const QString jid = currentJid();
     if (jid.isEmpty()) {

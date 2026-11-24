@@ -143,7 +143,7 @@ BAILEYS_DIR=/path/to/node_modules/@whiskeysockets/baileys ./qt/tests/run_tests.s
 === Signal (vs libsignal) ===       16 + 18 checks, 0 failed
 === message layer (vs libsignal) === 107 + 18 checks, 0 failed
 === group sender keys (vs Baileys GroupCipher) === 42 + 10 checks, 0 failed
-=== media upload/download (vs Baileys) === 72 + 12 checks, 0 failed
+=== media upload/download (vs Baileys) === 89 + 12 checks, 0 failed
 ```
 
 Eleven suites; `run_tests.sh` builds and runs them all with a plain host g++
@@ -191,9 +191,13 @@ presence/chatstate/receipt signals, credential persistence, 5-second reconnect
   pre-key top-up.
 - **Media**: attach a file → fresh 32-byte mediaKey → `HKDF("WhatsApp <Type>
   Keys")` → AES-256-CBC + 10-byte HMAC → `<iq xmlns=w:m><media_conn/></iq>` →
-  POST to the CDN → image/video/audio/document message with
-  `url/directPath/mediaKey/fileSha256/fileEncSha256/fileLength`. Downloads go
-  the other way (`File ▸ Save media from chat…`), MAC-verified before writing.
+  POST to the CDN → message with `url/directPath/mediaKey/fileSha256/
+  fileEncSha256/fileLength`. Every template is covered: image, video,
+  audio, document, **sticker** (`.webp` → `StickerMessage` on the same
+  `/mms/image` upload path with the Image key mapping) and **voice notes**
+  (`File ▸ Send voice note…`, `ptt=true` + duration read from the Ogg granule
+  position). Downloads go the other way (`File ▸ Save media from chat…`),
+  MAC-verified before writing.
 
 Missing: app state (mute/pin/archive), communities, presence privacy, USync
 device lists (bundles are fetched per send), media thumbnails. See

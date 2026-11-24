@@ -931,7 +931,7 @@ void WhatsAppDirect::registerMedia(const QString &msgId, wa::media::Type type,
 }
 
 void WhatsAppDirect::sendMedia(const QString &jid, const QString &filePath,
-                               const QString &caption) {
+                               const QString &caption, bool voiceNote) {
     if (!m_connected || !m_handshakeDone || m_meJid.isEmpty()) {
         emit sendResult(QString(), false, "not connected to WhatsApp");
         return;
@@ -963,6 +963,20 @@ void WhatsAppDirect::sendMedia(const QString &jid, const QString &filePath,
     upload.meta.caption = caption.toStdString();
     upload.meta.title = fileName;
     upload.type = wa::media::typeForMime(upload.meta.mimetype, fileName);
+
+    if (voiceNote) {
+        if (upload.type != wa::media::Type::Audio) {
+            emit sendResult(upload.send.msgId, false,
+                            "voice notes must be audio (ogg/opus)");
+            return;
+        }
+        upload.meta.ptt = true;
+        int seconds = 0;
+        if (wa::media::oggOpusDuration(wa::media::Bytes(raw.begin(), raw.end()), seconds))
+            upload.meta.seconds = seconds;
+        // WhatsApp tags voice notes as opus/ogg regardless of container.
+        upload.meta.mimetype = "audio/ogg; codecs=opus";
+    }
 
     // A fresh media key per file, exactly like Baileys' encryptedStream().
     const QByteArray mediaKey = randomBytes32();

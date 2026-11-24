@@ -21,6 +21,7 @@ std::string mappingFor(Type type) {
     case Type::ImageThumbnail: return "Image Thumbnail";
     case Type::VideoThumbnail: return "Video Thumbnail";
     case Type::DocumentThumbnail: return "Document Thumbnail";
+    case Type::Sticker: return "Image";   // MEDIA_HKDF_KEY_MAPPING.sticker = Image
     case Type::LinkThumbnail: return "Link Thumbnail";
     case Type::PaymentBackground: return "Payment Background";
     }
@@ -38,8 +39,7 @@ Bytes sliceOf(const Bytes &b, size_t from, size_t to) {
 std::string hkdfInfo(Type type) { return "WhatsApp " + mappingFor(type) + " Keys"; }
 
 bool typeFromName(const std::string &name, Type &out) {
-    if (name == "image" || name == "product-catalog-image" || name == "sticker" ||
-        name == "product") {
+    if (name == "image" || name == "product-catalog-image" || name == "product") {
         out = Type::Image;
     } else if (name == "video" || name == "gif" || name == "ptv") {
         out = Type::Video;
@@ -47,6 +47,8 @@ bool typeFromName(const std::string &name, Type &out) {
         out = Type::Audio;
     } else if (name == "document") {
         out = Type::Document;
+    } else if (name == "sticker") {
+        out = Type::Sticker;
     } else if (name == "md-msg-hist") {
         out = Type::History;
     } else if (name == "md-app-state") {

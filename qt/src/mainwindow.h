@@ -50,6 +50,7 @@ private slots:
     void onChatSelected();
     void sendCurrentMessage();
     void attachFile();
+    void sendVoiceNote();
     void saveMedia();
     void showQr();
     void toggleDirectMode(bool on);

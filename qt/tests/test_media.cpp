@@ -241,6 +241,80 @@ int main(int argc, char **argv) {
         check(media::typeForMime("application/octet-stream", "a.bin") == media::Type::Document,
               "unknown files are documents");
 
+        // Voice-note duration from the Ogg granule position.
+        {
+            Bytes ogg;
+            auto put = [&ogg](const char *bytes, size_t n) {
+                for (size_t i = 0; i < n; ++i) ogg.push_back(uint8_t(bytes[i]));
+            };
+            const char header[] = {'O', 'g', 'g', 'S', 0, 0x02};
+            put(header, sizeof header);
+            // granule = 2.5 s * 48000 = 120000 samples, little endian
+            const uint64_t granule = 120000;
+            for (int i = 0; i < 8; ++i) ogg.push_back(uint8_t((granule >> (8 * i)) & 0xff));
+            for (int i = 0; i < 12; ++i) ogg.push_back(0);   // serial, seq, crc
+            ogg.push_back(1);                                // one segment
+            ogg.push_back(4);                                // of 4 bytes
+            ogg.push_back('O'); ogg.push_back('p'); ogg.push_back('u'); ogg.push_back('s');
+            int seconds = -1;
+            check(media::oggOpusDuration(ogg, seconds), "ogg page is parsed");
+            check(seconds == 3, "granule 120000 -> 3s (rounded up)", std::to_string(seconds));
+            Bytes notOgg(40, 0);
+            seconds = -1;
+            check(!media::oggOpusDuration(notOgg, seconds), "non-ogg is rejected");
+        }
+
+        // Stickers: WebP files, /mms/image upload path, "Image" key mapping —
+        // but a StickerMessage on the wire.
+        check(media::typeForMime("image/webp", "sticker.webp") == media::Type::Sticker,
+              ".webp is a sticker");
+        check(media::hkdfInfo(media::Type::Sticker) == "WhatsApp Image Keys",
+              "sticker uses the Image key mapping");
+        {
+            media::MediaConn conn;
+            conn.hostname = "mmg.whatsapp.net";
+            conn.auth = "tok";
+            check(media::uploadUrl(conn, media::Type::Sticker, fileEncSha256).find("/mms/image/") !=
+                      std::string::npos,
+                  "sticker uploads to /mms/image");
+
+            waproto::Message sticker;
+            media::MediaMeta meta;
+            meta.mimetype = "image/webp";
+            meta.fileName = "sticker.webp";
+            meta.width = 512;
+            meta.height = 512;
+            media::UploadedMedia uploaded;
+            uploaded.mediaKey = mediaKey;
+            uploaded.fileSha256 = fileSha256;
+            uploaded.fileEncSha256 = fileEncSha256;
+            uploaded.fileLength = plaintext.size();
+            uploaded.directPath = "/v/t62.7118-24/abc";
+            uploaded.url = "https://mmg.whatsapp.net/v/t62.7118-24/abc";
+            uploaded.mediaKeyTimestamp = 1700000000;
+            media::fillMediaMessage(media::Type::Sticker, uploaded, meta, sticker);
+            check(!sticker.sticker.empty(), "sticker fills StickerMessage");
+            check(sticker.mediaType() == "sticker", "sticker media type");
+            check(sticker.sticker.mimetype == "image/webp", "sticker mimetype");
+            check(sticker.sticker.width == 512 && sticker.sticker.height == 512,
+                  "sticker dimensions");
+
+            const Bytes encoded = waproto::encodeMessage(sticker);
+            waproto::Message decoded;
+            check(waproto::decodeMessage(encoded, decoded), "sticker message round-trips");
+            check(decoded.sticker.mimetype == "image/webp", "sticker mimetype survives");
+            check(decoded.sticker.mediaKey == mediaKey, "sticker media key survives");
+            check(decoded.sticker.directPath == "/v/t62.7118-24/abc", "sticker directPath");
+            check(decoded.sticker.fileLength == plaintext.size(), "sticker length");
+            check(decoded.image.empty(), "sticker is not an image message");
+
+            media::Type found = media::Type::Document;
+            waproto::MediaInfo info;
+            check(media::mediaInfoOf(decoded, found, info) &&
+                      found == media::Type::Sticker,
+                  "sticker recognised when decoding");
+        }
+
         std::ofstream out(writeDir + "/cpp_media.txt");
         out << "CPPMEDIAKEY " << wa::crypto::toHex(mediaKey) << "\n";
         out << "CPPMEDIABLOB " << wa::crypto::toHex(blob) << "\n";

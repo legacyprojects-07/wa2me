@@ -30,6 +30,7 @@ enum class Type {
     Video,
     Audio,
     Document,
+    Sticker,          // StickerMessage: /mms/image + the "Image" key mapping
     History,
     AppState,
     ImageThumbnail,

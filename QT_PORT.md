@@ -223,10 +223,12 @@ Implemented **and verified byte-for-byte against Baileys 6.7.22** (see
 - ✅ **Media** (`src/direct/media_upload.cpp`): `<iq xmlns=w:m><media_conn/></iq>`,
   the exact CDN upload URL (base64url of `SHA-256(ciphertext‖MAC)`),
   `prepareUpload` (fresh mediaKey → HKDF → AES-256-CBC + 10-byte HMAC →
-  `fileSha256`/`fileEncSha256`), image/video/audio/document messages with
+  `fileSha256`/`fileEncSha256`), every media template — image, video, audio,
+  document, sticker (WebP → `StickerMessage`, same `/mms/image` path and Image
+  key mapping) and voice notes (`ptt` + Ogg granule duration) — with
   `url`/`directPath`/`mediaKey`/`mediaKeyTimestamp`, and download →
   MAC-verify → decrypt → file. Baileys' `encryptedStream()` produces the same
-  ciphertext and decrypts ours (72 + 12 checks)
+  ciphertext and decrypts ours (89 + 12 checks)
 - ✅ **Group administration**: create, join (code or chat.whatsapp.com link),
   leave, add/remove/promote/demote participants, subject, description, invite
   get/revoke — byte-shape identical to Baileys `groups.js`, exposed in the
@@ -337,7 +339,7 @@ Node's `crypto` (set `BAILEYS_DIR` to run the interop phases as well):
 | `test_history` | a real Baileys-produced `HistorySync` blob decrypts (HKDF + AES-CBC + 10-byte HMAC), inflates through the zlib wrapper and flattens into chats/messages/pushnames |
 | `test_message` | full message layer: parse the real `<iq xmlns=encrypt>` bundle node, build a `<message>` stanza, libsignal decrypts it (text + `deviceSentMessage`), and C++ decrypts libsignal's `pkmsg`/`msg` replies into the right chat; also group stanzas (`skmsg` body + distribution fan-out, sender-key memory), group metadata parse and skmsg receive, and the group-administration set (create/leave/subject/description/participants/invite/accept incl. their error and per-participant status parsing, plus a wire round-trip of `<create>`) |
 | `test_sender_key` | Baileys' `GroupCipher` decrypts our `skmsg` (HKDF `WhisperGroup`, XEdDSA); we decrypt theirs including its skipped iterations (0, 2, 4…), reject replays/tampering/wrong key id, and re-key cleanly |
-| `test_media` | Baileys' `encryptedStream()` ciphertext/hashes for the same file+mediaKey are identical, the CDN path (`base64url(SHA-256(cipher‖MAC))`) and upload URL match, tampered blobs are rejected, and both directions decrypt; ImageMessage/DocumentMessage decode against protobufjs |
+| `test_media` | Baileys' `encryptedStream()` ciphertext/hashes for the same file+mediaKey are identical, the CDN path (`base64url(SHA-256(cipher‖MAC))`) and upload URL match, tampered blobs are rejected, and both directions decrypt; ImageMessage/DocumentMessage decode against protobufjs; stickers use the Image key mapping, `/mms/image` and a round-tripping `StickerMessage`; `oggOpusDuration` reads the Ogg granule position |
 | `qt4_check.sh` | every Qt source compiles against the real Qt 4.7.4 headers (`QT_VERSION 0x040704`) — no Qt 4.8+/5/6 API can creep back in |
 
 Eleven suites run with a plain host `g++`; three of them are three-phase
