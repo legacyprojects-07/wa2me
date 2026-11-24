@@ -3,3 +3,6 @@ auth_state/
 data/
 .env
 *.log
+build/
+qt/build/
+*.user
