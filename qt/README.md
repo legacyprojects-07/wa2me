@@ -106,7 +106,7 @@ tests/
   test_signal.cpp       Signal sessions, interop with libsignal (3 phases)
   test_wa_proto.cpp     Message/HistorySync vs protobufjs, both directions
   test_history.cpp      real encrypted HistorySync blob → chats/messages
-  test_message.cpp      <message> stanza build/parse + group stanzas, vs libsignal
+  test_message.cpp      <message> stanza build/parse, group send + group admin, vs libsignal
   test_sender_key.cpp   group sender keys vs Baileys' GroupCipher (3 phases)
   test_media.cpp        upload/download crypto+URLs vs Baileys encryptedStream()
   test_qt4compat.cpp    Qt 4-only: JSON shim round-trips (creds.json)
@@ -141,7 +141,7 @@ BAILEYS_DIR=/path/to/node_modules/@whiskeysockets/baileys ./qt/tests/run_tests.s
 === WAProto ===            58 checks, 0 failed
 === history / media ===    59 checks, 0 failed
 === Signal (vs libsignal) ===       16 + 18 checks, 0 failed
-=== message layer (vs libsignal) === 71 + 18 checks, 0 failed
+=== message layer (vs libsignal) === 107 + 18 checks, 0 failed
 === group sender keys (vs Baileys GroupCipher) === 42 + 10 checks, 0 failed
 === media upload/download (vs Baileys) === 72 + 12 checks, 0 failed
 ```
@@ -178,16 +178,23 @@ presence/chatstate/receipt signals, credential persistence, 5-second reconnect
 - **History sync**: `HistorySyncNotification` → CDN download → media-key
   decrypt (HKDF + AES-256-CBC + HMAC) → inflate → `HistorySync` parse →
   chats, messages and pushnames in the chat list.
-- **Group messages**: `<iq xmlns=w:g2><query/></iq>` metadata, one sender-key
-  chain per group (`skmsg` body with XEdDSA signature), sender-key
-  distribution messages fanned out to devices that do not have them yet
-  (sender-key memory), skipped-key handling on receive, chains persisted in
-  `creds.json`.
+- **Group messages**: `<iq xmlns=w:g2><query request=interactive/></iq>`
+  metadata, one sender-key chain per group (`skmsg` body with XEdDSA
+  signature), sender-key distribution messages fanned out to devices that do
+  not have them yet (sender-key memory), skipped-key handling on receive,
+  chains persisted in `creds.json`.
+- **Group administration**: create, join by invite code/link, leave, add /
+  remove / promote / demote participants, subject, description, and invite
+  code get/revoke — the same `w:g2` stanzas Baileys sends, in both modes
+  (`Group` menu). Incoming `<notification type="w:gp2">` updates rename the
+  chat and drop stale metadata; `<notification type="encrypt">` triggers a
+  pre-key top-up.
 - **Media**: attach a file → fresh 32-byte mediaKey → `HKDF("WhatsApp <Type>
   Keys")` → AES-256-CBC + 10-byte HMAC → `<iq xmlns=w:m><media_conn/></iq>` →
   POST to the CDN → image/video/audio/document message with
   `url/directPath/mediaKey/fileSha256/fileEncSha256/fileLength`. Downloads go
   the other way (`File ▸ Save media from chat…`), MAC-verified before writing.
 
-Missing: app state (mute/pin/archive), presence privacy, USync device lists
-(bundles are fetched per send). See `QT_PORT.md` §3 and §6.
+Missing: app state (mute/pin/archive), communities, presence privacy, USync
+device lists (bundles are fetched per send), media thumbnails. See
+`QT_PORT.md` §3 and §6.

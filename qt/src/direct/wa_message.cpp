@@ -243,7 +243,10 @@ BinaryNode buildGroupMetadataRequest(const std::string &id, const std::string &g
     iq.setAttr("type", "get");
     iq.setAttr("xmlns", "w:g2");
     iq.setAttr("to", groupJid);
-    iq.addChild(BinaryNode("query"));
+    // Baileys asks for the interactive metadata (request="interactive").
+    BinaryNode query("query");
+    query.setAttr("request", "interactive");
+    iq.addChild(query);
     return iq;
 }
 
@@ -261,6 +264,10 @@ bool parseGroupMetadata(const BinaryNode &iq, GroupInfo &out, std::string &error
     out.jid = group->attrOr("id");
     out.subject = group->attrOr("subject");
     out.addressingMode = group->attrOr("addressing_mode");
+    if (const BinaryNode *desc = group->child("description")) {
+        out.descId = desc->attrOr("id");
+        if (const BinaryNode *body = desc->child("body")) out.description = body->text;
+    }
     for (const BinaryNode *p : group->childrenNamed("participant")) {
         const std::string jid = p->attrOr("jid");
         if (!jid.empty()) out.participants.push_back(jid);
@@ -269,6 +276,223 @@ bool parseGroupMetadata(const BinaryNode &iq, GroupInfo &out, std::string &error
         error = "group has no participants";
         return false;
     }
+    return true;
+}
+
+// ── Group administration ──────────────────────────────────────────────────
+
+namespace {
+
+BinaryNode groupIq(const std::string &id, const std::string &groupJid,
+                   const std::string &type) {
+    BinaryNode iq("iq");
+    iq.setAttr("id", id);
+    iq.setAttr("type", type);
+    iq.setAttr("xmlns", "w:g2");
+    iq.setAttr("to", groupJid);
+    return iq;
+}
+
+std::string iqErrorText(const BinaryNode &iq) {
+    const BinaryNode *err = iq.child("error");
+    if (!err) return std::string();
+    std::string text = err->attrOr("text");
+    if (text.empty()) text = err->attrOr("code", "?");
+    return text;
+}
+
+} // namespace
+
+const char *groupActionTag(GroupAction action) {
+    switch (action) {
+    case GroupAction::Add: return "add";
+    case GroupAction::Remove: return "remove";
+    case GroupAction::Promote: return "promote";
+    case GroupAction::Demote: return "demote";
+    }
+    return "add";
+}
+
+bool parseGroupAction(const std::string &name, GroupAction &out) {
+    if (name == "add") { out = GroupAction::Add; return true; }
+    if (name == "remove") { out = GroupAction::Remove; return true; }
+    if (name == "promote") { out = GroupAction::Promote; return true; }
+    if (name == "demote") { out = GroupAction::Demote; return true; }
+    return false;
+}
+
+BinaryNode buildGroupCreateRequest(const std::string &id, const std::string &subject,
+                                   const std::vector<std::string> &participants,
+                                   const std::string &key) {
+    BinaryNode iq = groupIq(id, "@g.us", "set");
+    BinaryNode create("create");
+    create.setAttr("subject", subject);
+    if (!key.empty()) create.setAttr("key", key);
+    for (const std::string &jid : participants) {
+        if (jid.empty()) continue;
+        BinaryNode p("participant");
+        p.setAttr("jid", jid);
+        create.addChild(p);
+    }
+    // <create> always carries the list content (even when empty).
+    if (create.contentType != BinaryNode::Content::List) create.setList({});
+    iq.addChild(create);
+    return iq;
+}
+
+BinaryNode buildGroupLeaveRequest(const std::string &id, const std::string &groupJid) {
+    BinaryNode iq = groupIq(id, "@g.us", "set");
+    BinaryNode leave("leave");
+    BinaryNode group("group");
+    group.setAttr("id", groupJid);
+    leave.addChild(group);
+    iq.addChild(leave);
+    return iq;
+}
+
+BinaryNode buildGroupSubjectRequest(const std::string &id, const std::string &groupJid,
+                                    const std::string &subject) {
+    BinaryNode iq = groupIq(id, groupJid, "set");
+    BinaryNode node("subject");
+    node.setText(subject);
+    iq.addChild(node);
+    return iq;
+}
+
+BinaryNode buildGroupDescriptionRequest(const std::string &id, const std::string &groupJid,
+                                        const std::string &description,
+                                        const std::string &prevId,
+                                        const std::string &newDescriptionId) {
+    BinaryNode iq = groupIq(id, groupJid, "set");
+    BinaryNode node("description");
+    if (description.empty()) {
+        node.setAttr("delete", "true");
+    } else if (!newDescriptionId.empty()) {
+        node.setAttr("id", newDescriptionId);
+    }
+    if (!prevId.empty()) node.setAttr("prev", prevId);
+    if (!description.empty()) {
+        BinaryNode body("body");
+        body.setText(description);
+        node.addChild(body);
+    }
+    iq.addChild(node);
+    return iq;
+}
+
+BinaryNode buildGroupParticipantsRequest(const std::string &id, const std::string &groupJid,
+                                         GroupAction action,
+                                         const std::vector<std::string> &participants) {
+    BinaryNode iq = groupIq(id, groupJid, "set");
+    BinaryNode node(groupActionTag(action));
+    for (const std::string &jid : participants) {
+        if (jid.empty()) continue;
+        BinaryNode p("participant");
+        p.setAttr("jid", jid);
+        node.addChild(p);
+    }
+    if (node.contentType != BinaryNode::Content::List) node.setList({});
+    iq.addChild(node);
+    return iq;
+}
+
+BinaryNode buildGroupInviteRequest(const std::string &id, const std::string &groupJid,
+                                   bool revoke) {
+    BinaryNode iq = groupIq(id, groupJid, revoke ? "set" : "get");
+    iq.addChild(BinaryNode("invite"));
+    return iq;
+}
+
+BinaryNode buildGroupAcceptInviteRequest(const std::string &id, const std::string &code) {
+    BinaryNode iq = groupIq(id, "@g.us", "set");
+    BinaryNode invite("invite");
+    invite.setAttr("code", code);
+    iq.addChild(invite);
+    return iq;
+}
+
+bool parseGroupParticipantsResult(const BinaryNode &iq, GroupAction action,
+                                  std::vector<ParticipantChange> &out, std::string &error) {
+    out.clear();
+    const std::string err = iqErrorText(iq);
+    if (!err.empty()) {
+        error = std::string("group ") + groupActionTag(action) + " failed: " + err;
+        return false;
+    }
+    const BinaryNode *node = iq.child(groupActionTag(action));
+    if (!node) {
+        error = std::string("group ") + groupActionTag(action) + " reply has no <" +
+                groupActionTag(action) + ">";
+        return false;
+    }
+    for (const BinaryNode *p : node->childrenNamed("participant")) {
+        ParticipantChange change;
+        change.jid = p->attrOr("jid");
+        change.status = p->attrOr("error", "200");   // Baileys: error || '200'
+        out.push_back(change);
+    }
+    return true;
+}
+
+bool parseGroupCreated(const BinaryNode &iq, GroupInfo &out, std::string &error) {
+    out = GroupInfo();
+    const std::string err = iqErrorText(iq);
+    if (err.empty()) {
+        const BinaryNode *group = iq.child("group");
+        if (!group) {
+            error = "group create reply has no <group>";
+            return false;
+        }
+        out.jid = group->attrOr("id");
+        out.subject = group->attrOr("subject");
+        out.addressingMode = group->attrOr("addressing_mode");
+        if (const BinaryNode *desc = group->child("description")) {
+            out.descId = desc->attrOr("id");
+            if (const BinaryNode *body = desc->child("body")) out.description = body->text;
+        }
+        for (const BinaryNode *p : group->childrenNamed("participant")) {
+            const std::string jid = p->attrOr("jid");
+            if (!jid.empty()) out.participants.push_back(jid);
+        }
+        if (out.jid.empty()) {
+            error = "group create reply has no id";
+            return false;
+        }
+        return true;
+    }
+    error = "group create failed: " + err;
+    return false;
+}
+
+bool parseGroupInviteCode(const BinaryNode &iq, std::string &code, std::string &error) {
+    code.clear();
+    const std::string err = iqErrorText(iq);
+    if (!err.empty()) {
+        error = "group invite failed: " + err;
+        return false;
+    }
+    const BinaryNode *invite = iq.child("invite");
+    if (!invite || invite->attrOr("code").empty()) {
+        error = "group invite reply has no code";
+        return false;
+    }
+    code = invite->attrOr("code");
+    return true;
+}
+
+bool parseGroupAcceptInvite(const BinaryNode &iq, std::string &groupJid, std::string &error) {
+    groupJid.clear();
+    const std::string err = iqErrorText(iq);
+    if (!err.empty()) {
+        error = "join group failed: " + err;
+        return false;
+    }
+    const BinaryNode *group = iq.child("group");
+    if (!group || group->attrOr("jid").empty()) {
+        error = "join group reply has no group jid";
+        return false;
+    }
+    groupJid = group->attrOr("jid");
     return true;
 }
 

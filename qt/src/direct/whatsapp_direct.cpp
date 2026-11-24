@@ -561,6 +561,12 @@ void WhatsAppDirect::handleNode(const BinaryNode &node) {
         // Answers to our <iq xmlns=encrypt><key/></iq> key requests.
         const QString iqId = QString::fromStdString(node.attrOr("id"));
         const QString iqType = attrs.value("type").toString();
+        // Answers to group administration IQs (create/join/leave/participants/
+        // subject/description/invite).
+        if (m_pendingGroupOps.contains(iqId)) {
+            handleGroupOpResult(iqId, node);
+            return;
+        }
         if (m_pendingSends.contains(iqId) && (iqType == "result" || iqType == "error")) {
             finishSend(iqId, node);
             return;
@@ -632,6 +638,19 @@ void WhatsAppDirect::handleNode(const BinaryNode &node) {
     if (tag == "receipt") { handleReceipt(node); return; }
     if (tag == "presence" || tag == "chatstate" || tag == "presence-update") {
         handlePresence(node);
+        return;
+    }
+    if (tag == "notification") {
+        const QString noteType = attrs.value("type").toString();
+        // Group changes arrive as <notification type="w:gp2" from=group>.
+        if (noteType == "w:gp2") handleGroupNotification(node);
+        // The server asks for more one-time pre-keys when it is running low.
+        else if (noteType == "encrypt") {
+            const wa::BinaryNode *count = node.child("count");
+            const int left = count ? std::atoi(count->attrOr("value", "0").c_str()) : 0;
+            DLOG(this, QString("server wants more pre-keys (%1 left)").arg(left));
+            if (m_meJid.size()) uploadPreKeys();
+        }
         return;
     }
     if (tag == "ib") {   // history sync notification (needs WAProto)
@@ -1105,6 +1124,381 @@ bool WhatsAppDirect::downloadMedia(const QString &chatJid, const QString &msgId,
                 emit mediaSaved(chatJid, msgId, savePath);
             });
     return true;
+}
+
+// Server-side group change: <notification type="w:gp2" from=groupJid
+// participant=…><subject subject="New"/></notification>. Keeps the chat list
+// and the cached metadata in step with what other members do.
+void WhatsAppDirect::handleGroupNotification(const wa::BinaryNode &node) {
+    const std::string groupJid = node.attrOr("from");
+    if (groupJid.empty() || !wa::isJidGroup(groupJid) || node.children.empty()) return;
+    const wa::BinaryNode &child = node.children.front();
+    const QString jid = QString::fromStdString(groupJid);
+    const QString kind = QString::fromStdString(child.tag);
+    QString detail;
+
+    auto refreshChat = [&](const std::string &subject) {
+        Chat chat = chatModelFor(groupJid);
+        chat.name = QString::fromStdString(subject);
+        chat.isGroup = true;
+        emit chatUpdated(chat);
+    };
+
+    if (child.tag == "subject" || child.tag == "create") {
+        detail = QString::fromStdString(child.attrOr("subject"));
+        if (m_groupCache.contains(jid)) {
+            wa::messaging::GroupInfo info = m_groupCache.value(jid);
+            if (!detail.isEmpty()) info.subject = detail.toStdString();
+            m_groupCache.insert(jid, info);
+        }
+        if (!detail.isEmpty()) refreshChat(detail.toStdString());
+    } else if (child.tag == "description") {
+        if (const wa::BinaryNode *body = child.child("body")) detail = QString::fromStdString(body->text);
+        if (m_groupCache.contains(jid)) {
+            wa::messaging::GroupInfo info = m_groupCache.value(jid);
+            info.descId = child.attrOr("id");
+            info.description = detail.toStdString();
+            m_groupCache.insert(jid, info);
+        }
+    } else if (child.tag == "add" || child.tag == "remove" || child.tag == "promote" ||
+               child.tag == "demote" || child.tag == "modify" || child.tag == "leave") {
+        // Membership changed: the cached participant list is stale.
+        m_groupCache.remove(jid);
+        QStringList who;
+        for (const wa::BinaryNode *p : child.childrenNamed("participant"))
+            who << QString::fromStdString(p->attrOr("jid"));
+        detail = who.join(", ");
+        if (child.tag == "remove" && who.size() == 1 &&
+            wa::areJidsSameUser(who.first().toStdString(),
+                                QString::fromStdString(node.attrOr("participant")).toStdString())) {
+            detail += " (left)";
+        }
+    }
+    if (detail.isEmpty()) detail = QString::fromStdString(child.tag);
+    DLOG(this, "group " + jid + " " + kind + ": " + detail);
+    emit groupNotification(jid, kind, detail);
+}
+
+// ─── Group administration ──────────────────────────────────────────────────
+//
+// Every call sends one <iq xmlns=w:g2> stanza and parks a PendingGroupOp under
+// its id; handleGroupOpResult() turns the reply into the group* signals. The
+// node shapes come from wa_message.h (Baileys groups.js).
+
+void WhatsAppDirect::sendGroupOp(const PendingGroupOp &op, const wa::BinaryNode &node) {
+    if (!m_connected) {
+        emit groupActionResult(op.kind, op.jid, false, "not connected");
+        return;
+    }
+    m_pendingGroupOps.insert(QString::fromStdString(node.attrOr("id")), op);
+    sendNode(node);
+}
+
+void WhatsAppDirect::createGroup(const QString &subject, const QStringList &participants) {
+    std::vector<std::string> jids;
+    for (const QString &jid : participants) {
+        if (jid.trimmed().isEmpty()) continue;
+        jids.push_back(jid.trimmed().toStdString());
+    }
+    if (subject.trimmed().isEmpty() || jids.empty()) {
+        emit groupActionResult("create", QString(), false,
+                               "a group needs a subject and at least one participant");
+        return;
+    }
+    // Baileys sends a fresh key with <create>; it only has to be unique.
+    const std::string id = wa::messaging::generateMessageId();
+    PendingGroupOp op;
+    op.kind = "create";
+    op.detail = subject;
+    sendGroupOp(op, wa::messaging::buildGroupCreateRequest(
+                        id, subject.trimmed().toStdString(), jids, id));
+    DLOG(this, QString("creating group \"%1\" with %2 participants")
+                   .arg(subject.trimmed())
+                   .arg(jids.size()));
+}
+
+void WhatsAppDirect::joinGroup(const QString &inviteCode) {
+    QString code = inviteCode.trimmed();
+    // Accept either a bare code or a https://chat.whatsapp.com/<code> link.
+    const int slash = code.lastIndexOf('/');
+    if (slash >= 0 && code.contains("chat.whatsapp.com")) code = code.mid(slash + 1);
+    if (code.isEmpty()) {
+        emit groupActionResult("join", QString(), false, "no invite code given");
+        return;
+    }
+    PendingGroupOp op;
+    op.kind = "join";
+    op.detail = code;
+    sendGroupOp(op, wa::messaging::buildGroupAcceptInviteRequest(
+                        wa::messaging::generateMessageId(), code.toStdString()));
+    DLOG(this, "joining group with invite code " + code);
+}
+
+void WhatsAppDirect::leaveGroup(const QString &groupJid) {
+    if (groupJid.isEmpty()) return;
+    PendingGroupOp op;
+    op.kind = "leave";
+    op.jid = groupJid;
+    sendGroupOp(op, wa::messaging::buildGroupLeaveRequest(
+                        wa::messaging::generateMessageId(), groupJid.toStdString()));
+    DLOG(this, "leaving group " + groupJid);
+}
+
+void WhatsAppDirect::setGroupSubject(const QString &groupJid, const QString &subject) {
+    if (groupJid.isEmpty() || subject.trimmed().isEmpty()) return;
+    PendingGroupOp op;
+    op.kind = "subject";
+    op.jid = groupJid;
+    op.detail = subject.trimmed();
+    sendGroupOp(op, wa::messaging::buildGroupSubjectRequest(
+                        wa::messaging::generateMessageId(), groupJid.toStdString(),
+                        subject.trimmed().toStdString()));
+    DLOG(this, "renaming group " + groupJid + " to " + subject.trimmed());
+}
+
+void WhatsAppDirect::setGroupDescription(const QString &groupJid, const QString &description) {
+    if (groupJid.isEmpty()) return;
+    // The server wants the *previous* description id to avoid clobbering a
+    // concurrent edit; fetch metadata first when we have no cached copy.
+    const QString iqId = QString::fromStdString(wa::messaging::generateMessageId());
+    PendingGroupOp op;
+    op.kind = "description";
+    op.jid = groupJid;
+    op.detail = description;
+    if (!m_groupCache.contains(groupJid)) {
+        // The server wants the previous description id, so fetch metadata first;
+        // the reply ("description-meta") restarts this edit.
+        PendingGroupOp meta;
+        meta.kind = "description-meta";
+        meta.jid = groupJid;
+        meta.detail = description;
+        sendGroupOp(meta, wa::messaging::buildGroupMetadataRequest(
+                               iqId.toStdString(), groupJid.toStdString()));
+        DLOG(this, "fetching group metadata before editing the description");
+        return;
+    }
+    const wa::messaging::GroupInfo info = m_groupCache.value(groupJid);
+    sendGroupOp(op, wa::messaging::buildGroupDescriptionRequest(
+                        wa::messaging::generateMessageId(), groupJid.toStdString(),
+                        description.toStdString(), info.descId,
+                        description.isEmpty() ? std::string()
+                                              : wa::messaging::generateMessageId()));
+    DLOG(this, "updating the group description of " + groupJid);
+}
+
+void WhatsAppDirect::updateGroupParticipants(const QString &groupJid,
+                                             const QStringList &participants,
+                                             const QString &action) {
+    wa::messaging::GroupAction parsed;
+    if (!wa::messaging::parseGroupAction(action.toStdString(), parsed)) {
+        emit groupActionResult(action, groupJid, false,
+                               "unknown action (add/remove/promote/demote)");
+        return;
+    }
+    std::vector<std::string> jids;
+    for (const QString &jid : participants) {
+        if (jid.trimmed().isEmpty()) continue;
+        jids.push_back(jid.trimmed().toStdString());
+    }
+    if (jids.empty()) {
+        emit groupActionResult(action, groupJid, false, "no participants given");
+        return;
+    }
+    PendingGroupOp op;
+    op.kind = action;
+    op.jid = groupJid;
+    op.detail = QString::number(jids.size());
+    sendGroupOp(op, wa::messaging::buildGroupParticipantsRequest(
+                        wa::messaging::generateMessageId(), groupJid.toStdString(),
+                        parsed, jids));
+    DLOG(this, QString("group %1: %2 %3 participant(s)")
+                   .arg(groupJid)
+                   .arg(action)
+                   .arg(jids.size()));
+}
+
+void WhatsAppDirect::requestGroupInvite(const QString &groupJid) {
+    PendingGroupOp op;
+    op.kind = "invite";
+    op.jid = groupJid;
+    sendGroupOp(op, wa::messaging::buildGroupInviteRequest(
+                        wa::messaging::generateMessageId(), groupJid.toStdString(), false));
+}
+
+void WhatsAppDirect::revokeGroupInvite(const QString &groupJid) {
+    PendingGroupOp op;
+    op.kind = "revoke";
+    op.jid = groupJid;
+    sendGroupOp(op, wa::messaging::buildGroupInviteRequest(
+                        wa::messaging::generateMessageId(), groupJid.toStdString(), true));
+}
+
+// Turns a group IQ reply into signals. Errors are reported per operation, and
+// cached metadata is dropped when the reply makes it stale.
+void WhatsAppDirect::handleGroupOpResult(const QString &iqId, const wa::BinaryNode &node) {
+    const PendingGroupOp op = m_pendingGroupOps.take(iqId);
+    const bool isError = node.attrOr("type") == "error";
+    const std::string kind = op.kind.toStdString();
+    std::string error;
+
+    if (op.kind == "create") {
+        wa::messaging::GroupInfo info;
+        if (isError || !wa::messaging::parseGroupCreated(node, info, error)) {
+            if (error.empty()) error = "group create failed";
+            DLOG(this, "group create failed: " + QString::fromStdString(error));
+            emit groupActionResult(op.kind, QString(), false,
+                                   QString::fromStdString(error));
+            return;
+        }
+        const QString jid = QString::fromStdString(info.jid);
+        if (info.subject.empty()) info.subject = op.detail.toStdString();
+        m_groupCache.insert(jid, info);
+        Chat chat = chatModelFor(info.jid);
+        chat.name = QString::fromStdString(info.subject);
+        chat.isGroup = true;
+        emit chatUpdated(chat);
+        emit groupCreated(jid, chat.name);
+        emit groupActionResult(op.kind, jid, true, QString());
+        DLOG(this, "group created: " + jid + " (" + chat.name + ")");
+        return;
+    }
+
+    if (op.kind == "join") {
+        std::string joined;
+        if (isError || !wa::messaging::parseGroupAcceptInvite(node, joined, error)) {
+            if (error.empty()) error = "join failed";
+            emit groupActionResult(op.kind, QString(), false,
+                                   QString::fromStdString(error));
+            return;
+        }
+        const QString jid = QString::fromStdString(joined);
+        // New member: fetch the metadata so the chat list shows the subject.
+        m_groupCache.remove(jid);
+        Chat chat = chatModelFor(joined);
+        chat.isGroup = true;
+        emit groupCreated(jid, chat.name);
+        emit groupActionResult(op.kind, jid, true, QString());
+        PendingGroupOp refresh;
+        refresh.kind = "metadata";
+        refresh.jid = jid;
+        sendGroupOp(refresh, wa::messaging::buildGroupMetadataRequest(
+                                 wa::messaging::generateMessageId(), joined));
+        DLOG(this, "joined group " + jid);
+        return;
+    }
+
+    if (op.kind == "metadata") {
+        wa::messaging::GroupInfo info;
+        if (isError || !wa::messaging::parseGroupMetadata(node, info, error)) {
+            DLOG(this, "group metadata refresh failed for " + op.jid +
+                           ": " + QString::fromStdString(error));
+            return;
+        }
+        if (info.subject.empty()) info.subject = op.jid.toStdString();
+        m_groupCache.insert(op.jid, info);
+        Chat chat = chatModelFor(info.jid);
+        chat.name = QString::fromStdString(info.subject);
+        chat.isGroup = true;
+        emit chatUpdated(chat);
+        return;
+    }
+
+    if (op.kind == "description-meta") {
+        wa::messaging::GroupInfo info;
+        if (isError || !wa::messaging::parseGroupMetadata(node, info, error)) {
+            if (error.empty()) error = "group metadata failed";
+            emit groupActionResult("description", op.jid, false,
+                                   QString::fromStdString(error));
+            return;
+        }
+        m_groupCache.insert(op.jid, info);
+        PendingGroupOp edit;
+        edit.kind = "description";
+        edit.jid = op.jid;
+        edit.detail = op.detail;
+        sendGroupOp(edit,
+                    wa::messaging::buildGroupDescriptionRequest(
+                        wa::messaging::generateMessageId(), op.jid.toStdString(),
+                        op.detail.toStdString(), info.descId,
+                        op.detail.isEmpty() ? std::string()
+                                            : wa::messaging::generateMessageId()));
+        return;
+    }
+
+    if (op.kind == "invite" || op.kind == "revoke") {
+        std::string code;
+        if (isError || !wa::messaging::parseGroupInviteCode(node, code, error)) {
+            if (error.empty()) error = "invite failed";
+            emit groupActionResult(op.kind, op.jid, false,
+                                   QString::fromStdString(error));
+            return;
+        }
+        emit groupInviteCode(op.jid, QString::fromStdString(code));
+        emit groupActionResult(op.kind, op.jid, true, QString());
+        DLOG(this, "group invite code for " + op.jid + ": " +
+                       QString::fromStdString(code));
+        return;
+    }
+
+    const bool isParticipants = op.kind == "add" || op.kind == "remove" ||
+                                op.kind == "promote" || op.kind == "demote";
+    if (isParticipants) {
+        wa::messaging::GroupAction action = wa::messaging::GroupAction::Add;
+        wa::messaging::parseGroupAction(kind, action);
+        std::vector<wa::messaging::ParticipantChange> changes;
+        if (isError ||
+            !wa::messaging::parseGroupParticipantsResult(node, action, changes, error)) {
+            if (error.empty()) error = "participant update failed";
+            emit groupActionResult(op.kind, op.jid, false,
+                                   QString::fromStdString(error));
+            return;
+        }
+        QStringList failed;
+        for (const wa::messaging::ParticipantChange &change : changes) {
+            if (change.ok()) continue;
+            failed << QString::fromStdString(change.jid + " (" + change.status + ")");
+        }
+        m_groupCache.remove(op.jid);   // membership changed
+        if (failed.isEmpty()) {
+            emit groupActionResult(op.kind, op.jid, true, QString());
+            DLOG(this, QString("group %1: %2 ok for %3 participant(s)")
+                           .arg(op.jid)
+                           .arg(op.kind)
+                           .arg(changes.size()));
+        } else {
+            const QString reason = "failed for " + failed.join(", ");
+            emit groupActionResult(op.kind, op.jid, false, reason);
+            DLOG(this, "group " + op.jid + ": " + op.kind + " " + reason);
+        }
+        return;
+    }
+
+    // leave / subject / description: an iq result is all the server sends.
+    if (isError) {
+        const wa::BinaryNode *err = node.child("error");
+        std::string text = err ? err->attrOr("text", err->attrOr("code", "?")) : "?";
+        emit groupActionResult(op.kind, op.jid, false, QString::fromStdString(text));
+        DLOG(this, "group " + op.kind + " failed: " + QString::fromStdString(text));
+        return;
+    }
+    if (op.kind == "leave") m_groupCache.remove(op.jid);
+    if (op.kind == "subject" || op.kind == "description") {
+        if (m_groupCache.contains(op.jid)) {
+            wa::messaging::GroupInfo info = m_groupCache.value(op.jid);
+            if (op.kind == "subject") info.subject = op.detail.toStdString();
+            else if (!op.detail.isEmpty())
+                info.descId = op.detail.toStdString();
+            m_groupCache.insert(op.jid, info);
+            Chat chat = chatModelFor(info.jid);
+            chat.name = QString::fromStdString(info.subject);
+            chat.isGroup = true;
+            emit chatUpdated(chat);
+        } else {
+            m_groupCache.remove(op.jid);
+        }
+    }
+    emit groupActionResult(op.kind, op.jid, true, QString());
+    DLOG(this, "group " + op.kind + " done for " + op.jid);
 }
 
 // ─── Key bundles, pre-key upload ───────────────────────────────────────────

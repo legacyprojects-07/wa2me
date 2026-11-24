@@ -227,6 +227,11 @@ Implemented **and verified byte-for-byte against Baileys 6.7.22** (see
   `url`/`directPath`/`mediaKey`/`mediaKeyTimestamp`, and download →
   MAC-verify → decrypt → file. Baileys' `encryptedStream()` produces the same
   ciphertext and decrypts ours (72 + 12 checks)
+- ✅ **Group administration**: create, join (code or chat.whatsapp.com link),
+  leave, add/remove/promote/demote participants, subject, description, invite
+  get/revoke — byte-shape identical to Baileys `groups.js`, exposed in the
+  `Group` menu for both modes. Incoming `w:gp2` notifications keep the chat
+  list and cached metadata current
 - ✅ **Qt 4.7.4**: every Qt API the client uses exists in 4.7.4 — verified by
   compiling all Qt sources against the real 4.7.4 headers
   (`qt/tests/qt4_check.sh`)
@@ -312,7 +317,7 @@ WhatsApp's chain).
       `qt/tests/qt4_check.sh` compiles every Qt source against real 4.7.4
       headers.
 - [ ] **Phase 6 — App state + USync**: mute/pin/archive patches, USync device
-      lists, media thumbnails, `QtSql` store.
+      lists, media thumbnails, `QtSql` store, communities.
 
 ## 8. Verification
 
@@ -330,7 +335,7 @@ Node's `crypto` (set `BAILEYS_DIR` to run the interop phases as well):
 | `test_signal` | X3DH/Double Ratchet: libsignal decrypts our `PreKeyWhisperMessage` and we decrypt its replies (two-phase Node run) |
 | `test_wa_proto` | `Message`/`HistorySync`/`HistorySyncNotification` encode **and** decode match protobufjs byte-for-byte, including padding round-trips |
 | `test_history` | a real Baileys-produced `HistorySync` blob decrypts (HKDF + AES-CBC + 10-byte HMAC), inflates through the zlib wrapper and flattens into chats/messages/pushnames |
-| `test_message` | full message layer: parse the real `<iq xmlns=encrypt>` bundle node, build a `<message>` stanza, libsignal decrypts it (text + `deviceSentMessage`), and C++ decrypts libsignal's `pkmsg`/`msg` replies into the right chat; also group stanzas (`skmsg` body + distribution fan-out, sender-key memory), group metadata parse and skmsg receive |
+| `test_message` | full message layer: parse the real `<iq xmlns=encrypt>` bundle node, build a `<message>` stanza, libsignal decrypts it (text + `deviceSentMessage`), and C++ decrypts libsignal's `pkmsg`/`msg` replies into the right chat; also group stanzas (`skmsg` body + distribution fan-out, sender-key memory), group metadata parse and skmsg receive, and the group-administration set (create/leave/subject/description/participants/invite/accept incl. their error and per-participant status parsing, plus a wire round-trip of `<create>`) |
 | `test_sender_key` | Baileys' `GroupCipher` decrypts our `skmsg` (HKDF `WhisperGroup`, XEdDSA); we decrypt theirs including its skipped iterations (0, 2, 4…), reject replays/tampering/wrong key id, and re-key cleanly |
 | `test_media` | Baileys' `encryptedStream()` ciphertext/hashes for the same file+mediaKey are identical, the CDN path (`base64url(SHA-256(cipher‖MAC))`) and upload URL match, tampered blobs are rejected, and both directions decrypt; ImageMessage/DocumentMessage decode against protobufjs |
 | `qt4_check.sh` | every Qt source compiles against the real Qt 4.7.4 headers (`QT_VERSION 0x040704`) — no Qt 4.8+/5/6 API can creep back in |

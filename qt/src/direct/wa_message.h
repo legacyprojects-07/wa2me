@@ -62,6 +62,8 @@ struct GroupInfo {
     std::string jid;
     std::string subject;
     std::string addressingMode;              // "pn" | "lid" (may be empty)
+    std::string description;                 // <description><body>
+    std::string descId;                      // <description id> — needed to edit it
     std::vector<std::string> participants;   // member jids (devices fetched separately)
 };
 
@@ -71,6 +73,56 @@ BinaryNode buildGroupMetadataRequest(const std::string &id, const std::string &g
 // Response: <iq type=result><group id subject addressing_mode>
 //             <participant jid=…/>…</group></iq>
 bool parseGroupMetadata(const BinaryNode &iq, GroupInfo &out, std::string &error);
+
+// ── Group administration (same namespace, iq type=set) ────────────────────
+//
+// Node shapes are copied from Baileys lib/Socket/groups.js so the server sees
+// the same stanzas it sees from Baileys:
+//
+//   create      <iq type=set to="@g.us"><create subject key><participant/>…</create></iq>
+//   leave       <iq type=set to="@g.us"><leave><group id/></leave></iq>
+//   subject     <iq type=set to=group><subject>text</subject></iq>
+//   description <iq type=set to=group><description [id][delete][prev]><body>…</body></description></iq>
+//   participants<iq type=set to=group><add|remove|promote|demote><participant/>…</add></iq>
+//   invite      <iq type=get to=group><invite/></iq>      (set = revoke)
+//   accept      <iq type=set to="@g.us"><invite code/></iq>
+enum class GroupAction { Add, Remove, Promote, Demote };
+
+const char *groupActionTag(GroupAction action);   // "add" | "remove" | "promote" | "demote"
+bool parseGroupAction(const std::string &name, GroupAction &out);   // inverse
+
+BinaryNode buildGroupCreateRequest(const std::string &id, const std::string &subject,
+                                   const std::vector<std::string> &participants,
+                                   const std::string &key);
+BinaryNode buildGroupLeaveRequest(const std::string &id, const std::string &groupJid);
+BinaryNode buildGroupSubjectRequest(const std::string &id, const std::string &groupJid,
+                                    const std::string &subject);
+// `description` empty means "delete the description".
+BinaryNode buildGroupDescriptionRequest(const std::string &id, const std::string &groupJid,
+                                        const std::string &description,
+                                        const std::string &prevId,
+                                        const std::string &newDescriptionId);
+BinaryNode buildGroupParticipantsRequest(const std::string &id, const std::string &groupJid,
+                                         GroupAction action,
+                                         const std::vector<std::string> &participants);
+BinaryNode buildGroupInviteRequest(const std::string &id, const std::string &groupJid,
+                                   bool revoke);
+BinaryNode buildGroupAcceptInviteRequest(const std::string &id, const std::string &code);
+
+// One participant's outcome in a participants-update reply: Baileys maps a
+// missing `error` attribute to "200"; anything else is a per-participant
+// failure (401 not authorised, 403 forbidden, 404 not found, 409 already in).
+struct ParticipantChange {
+    std::string jid;
+    std::string status;
+    bool ok() const { return status == "200"; }
+};
+
+bool parseGroupParticipantsResult(const BinaryNode &iq, GroupAction action,
+                                  std::vector<ParticipantChange> &out, std::string &error);
+bool parseGroupCreated(const BinaryNode &iq, GroupInfo &out, std::string &error);
+bool parseGroupInviteCode(const BinaryNode &iq, std::string &code, std::string &error);
+bool parseGroupAcceptInvite(const BinaryNode &iq, std::string &groupJid, std::string &error);
 
 // ── Outgoing messages ─────────────────────────────────────────────────────
 

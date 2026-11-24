@@ -26,6 +26,7 @@
 #include <QDialog>
 #include <QDialogButtonBox>
 #include <QCheckBox>
+#include <QInputDialog>
 
 #include "api_client.h"          // also brings in the QJson* shim + Qt4 helpers
 #include "direct/whatsapp_direct.h"
@@ -67,6 +68,16 @@ MainWindow::MainWindow(QWidget *parent) : QMainWindow(parent) {
             SLOT(onDirectMediaSaved(QString,QString,QString)));
     connect(m_direct, SIGNAL(mediaFailed(QString,QString,QString)), this,
             SLOT(onDirectMediaFailed(QString,QString,QString)));
+    connect(m_direct, SIGNAL(groupActionResult(QString,QString,bool,QString)), this,
+            SLOT(onGroupAction(QString,QString,bool,QString)));
+    connect(m_direct, SIGNAL(groupCreated(QString,QString)), this,
+            SLOT(onGroupCreated(QString,QString)));
+    connect(m_direct, SIGNAL(groupInviteCode(QString,QString)), this,
+            SLOT(onGroupInviteCode(QString,QString)));
+    connect(m_direct, SIGNAL(groupNotification(QString,QString,QString)), this,
+            SLOT(onGroupNotification(QString,QString,QString)));
+    connect(m_api, SIGNAL(groupActionDone(QString,QJsonObject)), this,
+            SLOT(onGroupActionDone(QString,QJsonObject)));
     SignalHook::attach(m_direct, SIGNAL(historySyncReceived(int,int,int)),
                        [this](int progress, int chats, int messages) {
                            statusBar()->showMessage(
@@ -154,6 +165,35 @@ void MainWindow::buildActions() {
     QAction *quit = fileMenu->addAction("Quit");
     quit->setShortcut(QKeySequence::Quit);
     connect(quit, SIGNAL(triggered()), qApp, SLOT(quit()));
+
+    // ── Group menu ───────────────────────────────────────────────────────
+    auto *groupMenu = menuBar()->addMenu("&Group");
+    struct GroupItem { const char *label; const char *slot; };
+    static const GroupItem kGroupItems[] = {
+        {"New group…", SLOT(groupNew())},
+        {"Join with invite code…", SLOT(groupJoin())},
+        {0, 0},
+        {"Add participant…", SLOT(groupAddParticipant())},
+        {"Remove participant…", SLOT(groupRemoveParticipant())},
+        {"Make admin…", SLOT(groupPromoteParticipant())},
+        {"Dismiss admin…", SLOT(groupDemoteParticipant())},
+        {0, 0},
+        {"Change subject…", SLOT(groupChangeSubject())},
+        {"Change description…", SLOT(groupChangeDescription())},
+        {0, 0},
+        {"Show invite code…", SLOT(groupShowInvite())},
+        {"Revoke invite code", SLOT(groupRevokeInvite())},
+        {0, 0},
+        {"Leave group", SLOT(groupLeave())},
+    };
+    for (const GroupItem &item : kGroupItems) {
+        if (!item.label) {
+            groupMenu->addSeparator();
+            continue;
+        }
+        QAction *action = groupMenu->addAction(QString::fromLatin1(item.label));
+        connect(action, SIGNAL(triggered()), this, item.slot);
+    }
 
     auto *connMenu = menuBar()->addMenu("&Connection");
     QAction *showQrAction = connMenu->addAction("Show QR / pair device");
@@ -679,4 +719,216 @@ void MainWindow::appendLog(const QString &line) {
 void MainWindow::onError(const QString &message, const QString &code, int httpStatus) {
     statusBar()->showMessage(QString("Error %1: %2 (%3)").arg(httpStatus).arg(message, code), 5000);
     appendLog(QString("[proxy] error %1: %2 [%3]").arg(httpStatus).arg(message, code));
+}
+
+// ─── Group administration ──────────────────────────────────────────────────
+//
+// The same operations exist in both modes: proxy mode posts to /groups/…,
+// direct mode sends the <iq xmlns=w:g2> stanzas. The dialogs are deliberately
+// plain (Qt 4.7 has no fancy pickers on Symbian either): a group name, a list
+// of phone numbers, or a single line of text.
+
+namespace {
+
+// "+91 99999 99999", "919999999999" and "…@s.whatsapp.net" all become a jid.
+QString asJid(const QString &input) {
+    QString v = input.trimmed();
+    if (v.isEmpty() || v.contains('@')) return v;
+    if (v.startsWith('+')) v = v.mid(1);
+    v.remove(' ').remove('-').remove('(').remove(')');
+    if (v.isEmpty()) return v;
+    return v + "@s.whatsapp.net";
+}
+
+} // namespace
+
+QStringList MainWindow::askParticipants(const QString &title, const QString &prompt) {
+    bool ok = false;
+    const QString text = QInputDialog::getText(this, title, prompt, QLineEdit::Normal,
+                                               QString(), &ok);
+    QStringList out;
+    if (!ok) return out;
+    QString normalized = text;
+    normalized.replace(';', ',');
+    normalized.replace('\n', ',');
+#if QT_VERSION >= QT_VERSION_CHECK(5, 14, 0)
+    const QStringList parts = normalized.split(',', Qt::SkipEmptyParts);
+#else
+    const QStringList parts = normalized.split(',', QString::SkipEmptyParts);
+#endif
+    for (const QString &part : parts) {
+        const QString jid = asJid(part);
+        if (!jid.isEmpty()) out << jid;
+    }
+    return out;
+}
+
+QString MainWindow::currentGroupJid() const {
+    const QString jid = currentJid();
+    if (jid.isEmpty() || !jid.endsWith("@g.us")) {
+        statusBar()->showMessage("Select a group chat first", 4000);
+        return QString();
+    }
+    return jid;
+}
+
+void MainWindow::groupNew() {
+    bool ok = false;
+    const QString subject = QInputDialog::getText(this, "New group", "Group name:",
+                                                  QLineEdit::Normal, QString(), &ok);
+    if (!ok || subject.trimmed().isEmpty()) return;
+    const QStringList participants =
+        askParticipants("New group", "Participants (phone numbers, comma separated):");
+    if (participants.isEmpty()) {
+        statusBar()->showMessage("A group needs at least one participant", 4000);
+        return;
+    }
+    if (m_directMode) m_direct->createGroup(subject.trimmed(), participants);
+    else m_api->createGroup(subject.trimmed(), participants);
+    statusBar()->showMessage("Creating group…", 3000);
+}
+
+void MainWindow::groupJoin() {
+    bool ok = false;
+    const QString code = QInputDialog::getText(
+        this, "Join group", "Invite code or https://chat.whatsapp.com/… link:",
+        QLineEdit::Normal, QString(), &ok);
+    if (!ok || code.trimmed().isEmpty()) return;
+    if (m_directMode) m_direct->joinGroup(code.trimmed());
+    else m_api->joinGroup(code.trimmed());
+    statusBar()->showMessage("Joining group…", 3000);
+}
+
+void MainWindow::changeGroupParticipants(const QString &action) {
+    const QString jid = currentGroupJid();
+    if (jid.isEmpty()) return;
+    const QString verb = action == QString("add")        ? QString("Add")
+                         : action == QString("remove")   ? QString("Remove")
+                         : action == QString("promote")  ? QString("Promote")
+                                                         : QString("Demote");
+    const QStringList participants = askParticipants(
+        verb + " participant", "Phone numbers or JIDs (comma separated):");
+    if (participants.isEmpty()) return;
+    if (m_directMode) m_direct->updateGroupParticipants(jid, participants, action);
+    else m_api->updateGroupParticipants(jid, participants, action);
+    statusBar()->showMessage(verb + "ing " + QString::number(participants.size()) +
+                                 " participant(s)…", 3000);
+}
+
+void MainWindow::groupAddParticipant() { changeGroupParticipants("add"); }
+void MainWindow::groupRemoveParticipant() { changeGroupParticipants("remove"); }
+void MainWindow::groupPromoteParticipant() { changeGroupParticipants("promote"); }
+void MainWindow::groupDemoteParticipant() { changeGroupParticipants("demote"); }
+
+void MainWindow::groupChangeSubject() {
+    const QString jid = currentGroupJid();
+    if (jid.isEmpty()) return;
+    bool ok = false;
+    const QString subject = QInputDialog::getText(this, "Group subject", "New subject:",
+                                                  QLineEdit::Normal, QString(), &ok);
+    if (!ok || subject.trimmed().isEmpty()) return;
+    if (m_directMode) m_direct->setGroupSubject(jid, subject.trimmed());
+    else m_api->updateGroupSubject(jid, subject.trimmed());
+}
+
+void MainWindow::groupChangeDescription() {
+    const QString jid = currentGroupJid();
+    if (jid.isEmpty()) return;
+    // QInputDialog::getMultiLineText is Qt 5, so the text box is built here.
+    QDialog dialog(this);
+    dialog.setWindowTitle("Group description");
+    QVBoxLayout *layout = new QVBoxLayout(&dialog);
+    layout->addWidget(new QLabel("Description (empty removes it):", &dialog));
+    QPlainTextEdit *edit = new QPlainTextEdit(&dialog);
+    edit->setMinimumSize(360, 140);
+    layout->addWidget(edit);
+    QDialogButtonBox *buttons = new QDialogButtonBox(
+        QDialogButtonBox::Ok | QDialogButtonBox::Cancel, Qt::Horizontal, &dialog);
+    layout->addWidget(buttons);
+    connect(buttons, SIGNAL(accepted()), &dialog, SLOT(accept()));
+    connect(buttons, SIGNAL(rejected()), &dialog, SLOT(reject()));
+    if (dialog.exec() != QDialog::Accepted) return;
+    const QString description = edit->toPlainText();
+    if (m_directMode) m_direct->setGroupDescription(jid, description);
+    else m_api->updateGroupDescription(jid, description);
+}
+
+void MainWindow::groupLeave() {
+    const QString jid = currentGroupJid();
+    if (jid.isEmpty()) return;
+    if (QMessageBox::question(this, "Leave group", "Leave this group?",
+                              QMessageBox::Yes | QMessageBox::No) != QMessageBox::Yes)
+        return;
+    if (m_directMode) m_direct->leaveGroup(jid);
+    else m_api->leaveGroup(jid);
+}
+
+void MainWindow::groupShowInvite() {
+    const QString jid = currentGroupJid();
+    if (jid.isEmpty()) return;
+    if (m_directMode) m_direct->requestGroupInvite(jid);
+    else m_api->getGroupInvite(jid);
+}
+
+void MainWindow::groupRevokeInvite() {
+    const QString jid = currentGroupJid();
+    if (jid.isEmpty()) return;
+    if (QMessageBox::question(this, "Revoke invite",
+                              "Reset the invite link? The old link stops working.",
+                              QMessageBox::Yes | QMessageBox::No) != QMessageBox::Yes)
+        return;
+    if (m_directMode) m_direct->revokeGroupInvite(jid);
+    else m_api->revokeGroupInvite(jid);
+}
+
+void MainWindow::onGroupAction(const QString &action, const QString &jid, bool ok,
+                               const QString &error) {
+    if (!ok) {
+        statusBar()->showMessage(QString("Group %1 failed: %2").arg(action, error), 6000);
+        appendLog(QString("[group] %1 %2 failed: %3").arg(action, jid, error));
+        return;
+    }
+    statusBar()->showMessage(QString("Group %1 done").arg(action), 3000);
+    appendLog(QString("[group] %1 %2 ok").arg(action, jid));
+}
+
+void MainWindow::onGroupNotification(const QString &groupJid, const QString &kind,
+                                     const QString &detail) {
+    appendLog(QString("[group] %1 %2: %3").arg(groupJid, kind, detail));
+    if (kind == "subject" || kind == "create")
+        statusBar()->showMessage(QString("Group renamed: %1").arg(detail), 4000);
+    else
+        statusBar()->showMessage(QString("Group update: %1 %2").arg(kind, detail), 4000);
+}
+
+void MainWindow::onGroupCreated(const QString &groupJid, const QString &subject) {
+    // The direct backend also emits chatUpdated(), which adds the chat; the
+    // proxy backend answers with the new group in groupActionDone().
+    statusBar()->showMessage(QString("Group \"%1\" ready").arg(subject), 4000);
+    appendLog(QString("[group] created %1 (%2)").arg(groupJid, subject));
+    refreshChats();
+}
+
+void MainWindow::onGroupInviteCode(const QString &groupJid, const QString &code) {
+    const QString link = "https://chat.whatsapp.com/" + code;
+    QMessageBox::information(this, "Group invite link",
+                             QString("Invite code for %1:\n\n%2\n\n%3")
+                                 .arg(groupJid, code, link));
+    appendLog(QString("[group] invite code %1").arg(code));
+}
+
+void MainWindow::onGroupActionDone(const QString &action, const QJsonObject &obj) {
+    // Proxy mode: /groups/… answered. Show the invite link, refresh the list.
+    const QString code = obj.value("code").toString();
+    const QString jid = obj.value("jid").toString();
+    if (action == "invite" || action == "revoke-invite") {
+        if (!code.isEmpty())
+            onGroupInviteCode(jid, code);
+        else
+            statusBar()->showMessage("No invite code in the reply", 4000);
+    } else {
+        statusBar()->showMessage(QString("Group %1 done").arg(action), 3000);
+    }
+    appendLog(QString("[group] %1 %2").arg(action, jid));
+    refreshChats();
 }

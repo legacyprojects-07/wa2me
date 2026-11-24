@@ -216,7 +216,9 @@ static void runGroupChecks(signal::Store &store) {
     check(iq.attrOr("xmlns") == "w:g2", "metadata iq namespace");
     check(iq.attrOr("type") == "get", "metadata iq type");
     check(iq.attrOr("to") == kGroupJid, "metadata iq target");
-    check(iq.child("query") != nullptr, "metadata iq has <query/>");
+    const BinaryNode *query = iq.child("query");
+    check(query != nullptr, "metadata iq has <query/>");
+    if (query) check(query->attrOr("request") == "interactive", "metadata iq asks interactive");
 
     BinaryNode result("iq");
     result.setAttr("type", "result");
@@ -247,6 +249,168 @@ static void runGroupChecks(signal::Store &store) {
     messaging::GroupInfo failed;
     check(!messaging::parseGroupMetadata(failure, failed, error), "group error reported");
     check(error.find("not-a-member") != std::string::npos, "error text propagated", error);
+
+    // ── Group administration stanzas (Baileys groups.js shapes) ──────────
+    {
+        // create: <iq type=set to="@g.us"><create subject key><participant/>…</create></iq>
+        const BinaryNode create = messaging::buildGroupCreateRequest(
+            "IQC", "Qt admins", {kPeerJid, "5522@s.whatsapp.net"}, "KEY123");
+        check(create.attrOr("type") == "set" && create.attrOr("xmlns") == "w:g2",
+              "create iq type/ns");
+        check(create.attrOr("to") == "@g.us", "create iq goes to @g.us");
+        const BinaryNode *createNode = create.child("create");
+        check(createNode != nullptr, "create has <create>");
+        if (createNode) {
+            check(createNode->attrOr("subject") == "Qt admins", "create subject attr");
+            check(createNode->attrOr("key") == "KEY123", "create key attr");
+            check(createNode->childrenNamed("participant").size() == 2,
+                  "create participants");
+        }
+
+        // The stanza must survive the wire codec unchanged.
+        const auto encoded = wa::binary::encode(create);
+        const auto decoded = wa::binary::decode(encoded);
+        check(decoded.ok, "create stanza decodes", decoded.error);
+        check(decoded.ok && decoded.node.child("create") != nullptr,
+              "create stanza keeps <create>");
+        check(decoded.ok && decoded.node.attrOr("xmlns") == "w:g2",
+              "create stanza keeps xmlns");
+
+        // leave: <iq type=set to="@g.us"><leave><group id/></leave></iq>
+        const BinaryNode leave = messaging::buildGroupLeaveRequest("IQL", kGroupJid);
+        const BinaryNode *leaveNode = leave.child("leave");
+        check(leaveNode && leaveNode->child("group") &&
+                  leaveNode->child("group")->attrOr("id") == kGroupJid,
+              "leave names the group");
+        check(leave.attrOr("to") == "@g.us", "leave goes to @g.us");
+
+        // subject: text content, not an attribute.
+        const BinaryNode subject =
+            messaging::buildGroupSubjectRequest("IQS", kGroupJid, "New name");
+        const BinaryNode *subjectNode = subject.child("subject");
+        check(subjectNode && subjectNode->contentType == BinaryNode::Content::Text &&
+                  subjectNode->text == "New name",
+              "subject carries text content");
+
+        // description: set (id + prev + <body>) and delete (delete=true).
+        const BinaryNode desc = messaging::buildGroupDescriptionRequest(
+            "IQD", kGroupJid, "Rules", "PREV1", "DESC2");
+        const BinaryNode *descNode = desc.child("description");
+        check(descNode && descNode->attrOr("id") == "DESC2" &&
+                  descNode->attrOr("prev") == "PREV1",
+              "description id/prev");
+        check(descNode && descNode->child("body") &&
+                  descNode->child("body")->text == "Rules",
+              "description body");
+        const BinaryNode descDelete = messaging::buildGroupDescriptionRequest(
+            "IQD2", kGroupJid, "", "PREV1", "");
+        const BinaryNode *delNode = descDelete.child("description");
+        check(delNode && delNode->attrOr("delete") == "true" && !delNode->child("body"),
+              "description delete");
+
+        // participants: <add><participant jid/>…</add>
+        const BinaryNode add = messaging::buildGroupParticipantsRequest(
+            "IQA", kGroupJid, messaging::GroupAction::Add, {kPeerJid});
+        const BinaryNode *addNode = add.child("add");
+        check(addNode && addNode->childrenNamed("participant").size() == 1,
+              "add participant node");
+        check(addNode && addNode->childrenNamed("participant")[0]->attrOr("jid") == kPeerJid,
+              "add participant jid");
+        check(messaging::groupActionTag(messaging::GroupAction::Promote) ==
+                      std::string("promote"),
+              "promote tag");
+        messaging::GroupAction parsedAction = messaging::GroupAction::Add;
+        check(messaging::parseGroupAction("demote", parsedAction) &&
+                  parsedAction == messaging::GroupAction::Demote,
+              "action names parse");
+
+        // Replies: per-participant status, "200" when the error attr is absent.
+        BinaryNode addReply("iq");
+        addReply.setAttr("type", "result");
+        BinaryNode addReplyNode("add");
+        BinaryNode okParticipant("participant");
+        okParticipant.setAttr("jid", kPeerJid);
+        BinaryNode rejectedParticipant("participant");
+        rejectedParticipant.setAttr("jid", "5522@s.whatsapp.net");
+        rejectedParticipant.setAttr("error", "403");
+        addReplyNode.addChild(okParticipant);
+        addReplyNode.addChild(rejectedParticipant);
+        addReply.addChild(addReplyNode);
+
+        std::vector<messaging::ParticipantChange> changes;
+        check(messaging::parseGroupParticipantsResult(addReply, messaging::GroupAction::Add,
+                                                      changes, error),
+              "participants reply parses", error);
+        check(changes.size() == 2, "both participants reported");
+        check(changes.size() == 2 && changes[0].ok() && !changes[1].ok(),
+              "per-participant status");
+        check(changes.size() == 2 && changes[1].status == "403",
+              "error code kept", changes.size() == 2 ? changes[1].status : "");
+
+        BinaryNode addError("iq");
+        addError.setAttr("type", "error");
+        BinaryNode errNode2("error");
+        errNode2.setAttr("code", "401");
+        errNode2.setAttr("text", "not-authorized");
+        addError.addChild(errNode2);
+        changes.clear();
+        check(!messaging::parseGroupParticipantsResult(
+                  addError, messaging::GroupAction::Add, changes, error),
+              "participants iq error is fatal");
+        check(error.find("not-authorized") != std::string::npos,
+              "participants error text", error);
+
+        // create reply.
+        BinaryNode created("iq");
+        created.setAttr("type", "result");
+        BinaryNode createdGroup("group");
+        createdGroup.setAttr("id", kGroupJid);
+        createdGroup.setAttr("subject", "Qt admins");
+        BinaryNode mine("participant");
+        mine.setAttr("jid", kMeJid);
+        createdGroup.addChild(mine);
+        created.addChild(createdGroup);
+        messaging::GroupInfo createdInfo;
+        check(messaging::parseGroupCreated(created, createdInfo, error),
+              "create reply parses", error);
+        check(createdInfo.jid == kGroupJid && createdInfo.subject == "Qt admins",
+              "created group id/subject");
+        check(!messaging::parseGroupCreated(addError, createdInfo, error),
+              "create error is reported");
+
+        // invite request + reply, revoke uses type=set.
+        const BinaryNode inviteGet = messaging::buildGroupInviteRequest("IQI", kGroupJid, false);
+        check(inviteGet.attrOr("type") == "get" && inviteGet.child("invite"),
+              "invite query");
+        const BinaryNode inviteRevoke =
+            messaging::buildGroupInviteRequest("IQI2", kGroupJid, true);
+        check(inviteRevoke.attrOr("type") == "set", "invite revoke is a set");
+
+        BinaryNode inviteReply("iq");
+        inviteReply.setAttr("type", "result");
+        BinaryNode inviteNode("invite");
+        inviteNode.setAttr("code", "ABC123");
+        inviteReply.addChild(inviteNode);
+        std::string code;
+        check(messaging::parseGroupInviteCode(inviteReply, code, error),
+              "invite code parses", error);
+        check(code == "ABC123", "invite code value", code);
+
+        // accept invite: <iq type=set to="@g.us"><invite code/></iq>
+        const BinaryNode accept = messaging::buildGroupAcceptInviteRequest("IQJ", "ABC123");
+        check(accept.attrOr("to") == "@g.us" && accept.child("invite") &&
+                  accept.child("invite")->attrOr("code") == "ABC123",
+              "accept invite stanza");
+        BinaryNode acceptReply("iq");
+        acceptReply.setAttr("type", "result");
+        BinaryNode accepted("group");
+        accepted.setAttr("jid", kGroupJid);
+        acceptReply.addChild(accepted);
+        std::string joined;
+        check(messaging::parseGroupAcceptInvite(acceptReply, joined, error),
+              "accept invite parses", error);
+        check(joined == kGroupJid, "joined group jid", joined);
+    }
 }
 
 static const BinaryNode *firstToNode(const BinaryNode &stanza) {

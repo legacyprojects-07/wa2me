@@ -20,8 +20,9 @@ itself instead of going through this backend.
   crypto libraries, so it runs on Symbian Qt 4.7.
 * **Direct mode (`--direct`)** — the app opens `wss://web.whatsapp.com/ws/chat`
   itself: Noise handshake, BinaryNode codec, QR pairing, keepalive, reconnect,
-  **Signal-encrypted text send/receive (1:1 and groups)**, **media
-  upload/download** and **chat history sync**. The whole stack — RFC 6455
+  **Signal-encrypted text send/receive (1:1 and groups)**, **group
+  administration** (create/join/leave/participants/subject/description/invite),
+  **media upload/download** and **chat history sync**. The whole stack — RFC 6455
   WebSocket, Noise, X25519, AES-GCM/CBC, HKDF, DEFLATE, Ed25519/XEdDSA, the
   Signal double ratchet, group sender keys, the WAProto subset and WhatsApp
   media crypto — is hand-written with **no libsodium, zlib, protobuf, libsignal
@@ -42,7 +43,8 @@ BAILEYS_DIR=/path/to/@whiskeysockets/baileys ./qt/tests/run_tests.sh  # + intero
 ```
 
 Read [`QT_PORT.md`](QT_PORT.md) for the architecture, the Baileys→C++ mapping,
-and exactly what direct mode still needs (app state, USync, thumbnails).
+and exactly what direct mode still needs (app state, communities, USync,
+thumbnails).
 See [`qt/README.md`](qt/README.md) for build/run details.
 ##### This project is review coded, I have tried my best to improve it still there might be some bugs/quirks. 
 ###### Enjoy!

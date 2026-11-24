@@ -13,14 +13,16 @@
 //   WORKING   : websocket lifecycle, Noise handshake, framing, QR pairing
 //               payloads, stream error handling, keepalive, stanza routing,
 //               1:1 text send/receive (Signal), group send/receive
-//               (sender keys, skmsg), media upload/download (CDN),
-//               HistorySync download+decode
+//               (sender keys, skmsg), group admin (create/join/leave/
+//               participants/subject/description/invite), media
+//               upload/download (CDN), HistorySync download+decode
 //   TODO      : app state (mute/pin/archive), presence privacy.
 
 #include <QObject>
 #include <QTimer>
 #include <QByteArray>
 #include <QString>
+#include <QStringList>
 #include "qt4compat/json.h"
 #include "qt4compat/qt4compat.h"
 #include "qt4compat/websocket.h"
@@ -87,6 +89,23 @@ public slots:
     bool downloadMedia(const QString &chatJid, const QString &msgId,
                        const QString &savePath);
 
+    // ── Group administration ────────────────────────────────────────────
+    // Same operations the proxy exposes as /groups/…, sent as the <iq
+    // xmlns=w:g2> stanzas Baileys sends (lib/Socket/groups.js). Replies arrive
+    // through groupActionResult(); create/join/invite have their own signals.
+    void createGroup(const QString &subject, const QStringList &participants);
+    void joinGroup(const QString &inviteCode);
+    void leaveGroup(const QString &groupJid);
+    void setGroupSubject(const QString &groupJid, const QString &subject);
+    void setGroupDescription(const QString &groupJid, const QString &description);
+    // `action` is "add" | "remove" | "promote" | "demote".
+    void updateGroupParticipants(const QString &groupJid,
+                                 const QStringList &participants,
+                                 const QString &action);
+    void requestGroupInvite(const QString &groupJid);   // fetch the code
+    void revokeGroupInvite(const QString &groupJid);    // invalidate the code
+
+
 signals:
     // Connection lifecycle
     void connectionUpdate(const QString &state, const QString &reason);
@@ -109,6 +128,18 @@ signals:
     void historySyncReceived(int progress, int chats, int messages);
 
     void sendResult(const QString &id, bool ok, const QString &error);
+    // Group administration: `action` is the operation ("create", "add",
+    // "subject", …). Failures carry the server's error text.
+    void groupActionResult(const QString &action, const QString &jid, bool ok,
+                           const QString &error);
+    void groupCreated(const QString &groupJid, const QString &subject);
+    void groupJoined(const QString &groupJid);
+    void groupInviteCode(const QString &groupJid, const QString &code);
+    // Server-side group change (someone renamed the group, changed membership…).
+    // `kind` is the notification child (subject/create/add/remove/promote/
+    // demote/modify/description/leave) and `detail` its human summary.
+    void groupNotification(const QString &groupJid, const QString &kind,
+                           const QString &detail);
     void mediaSaved(const QString &chatJid, const QString &msgId, const QString &path);
     void mediaFailed(const QString &chatJid, const QString &msgId, const QString &error);
     void mediaProgress(const QString &msgId, const QString &stage);
@@ -131,6 +162,12 @@ signals:
         wa::media::Type type = wa::media::Type::Document;
         wa::media::UploadedMedia uploaded;
         wa::media::MediaMeta meta;
+    };
+    // A group administration IQ waiting for its reply.
+    struct PendingGroupOp {
+        QString kind;     // create|join|leave|subject|description|add|remove|…
+        QString jid;      // group jid (empty for create/join)
+        QString detail;   // subject/description text, participant count
     };
 
 private slots:
@@ -164,6 +201,7 @@ private:
     void handleEncryptedMessage(const wa::BinaryNode &node);
     void handleReceipt(const wa::BinaryNode &node);
     void handlePresence(const wa::BinaryNode &node);
+    void handleGroupNotification(const wa::BinaryNode &node);
 
     // ── Signal / message plumbing ────────────────────────────────────────
     class CredsStore;                       // wa::signal::Store over creds.json
@@ -182,6 +220,8 @@ private:
     void registerMedia(const QString &msgId, wa::media::Type type,
                        const wa::waproto::MediaInfo &info);
 
+    void sendGroupOp(const PendingGroupOp &op, const wa::BinaryNode &node);
+    void handleGroupOpResult(const QString &iqId, const wa::BinaryNode &node);
     void requestGroupMetadata(const PendingSend &pending);
     void fetchGroupBundles(const PendingSend &pending,
                            const wa::messaging::GroupInfo &info);
@@ -213,6 +253,7 @@ private:
     QJsonObject m_senderKeyJson;   // "<group>::<user>" -> serialized sender key
     QHash<QString, wa::messaging::GroupInfo> m_groupCache;
     QHash<QString, PendingSend> m_pendingGroupMeta;   // iq id -> queued group send
+    QHash<QString, PendingGroupOp> m_pendingGroupOps; // iq id -> group admin op
     // group jid -> device jids that already hold our sender key (Baileys'
     // sender-key-memory, which keeps the distribution fan-out small).
     QHash<QString, QSet<QString> > m_senderKeyMemory;

@@ -14,6 +14,7 @@
 #include <QMainWindow>
 #include <QList>
 #include <QHash>
+#include <QStringList>
 
 #include "models.h"
 #include "qt4compat/json.h"
@@ -57,6 +58,27 @@ private slots:
     void onQrDialogCodeStatus(const QString &status, const QString &qr);
     void toggleLogDock();
 
+    // Group administration (works in both modes: REST endpoints in proxy
+    // mode, <iq xmlns=w:g2> stanzas in direct mode).
+    void groupNew();
+    void groupJoin();
+    void groupAddParticipant();
+    void groupRemoveParticipant();
+    void groupPromoteParticipant();
+    void groupDemoteParticipant();
+    void groupChangeSubject();
+    void groupChangeDescription();
+    void groupLeave();
+    void groupShowInvite();
+    void groupRevokeInvite();
+    void onGroupAction(const QString &action, const QString &jid, bool ok,
+                       const QString &error);              // direct mode
+    void onGroupActionDone(const QString &action, const QJsonObject &obj);  // proxy mode
+    void onGroupCreated(const QString &groupJid, const QString &subject);
+    void onGroupNotification(const QString &groupJid, const QString &kind,
+                             const QString &detail);
+    void onGroupInviteCode(const QString &groupJid, const QString &code);
+
     // ApiClient
     void onChatsReady(const QList<Chat> &chats);
     void onDirectChat(const Chat &chat);
@@ -88,6 +110,9 @@ private:
     void buildActions();
     void applyMode();
     void appendLog(const QString &line);
+    void changeGroupParticipants(const QString &action);
+    QStringList askParticipants(const QString &title, const QString &prompt);
+    QString currentGroupJid() const;   // empty unless a group chat is selected
     void renderMessages();
     QString currentJid() const;
 
