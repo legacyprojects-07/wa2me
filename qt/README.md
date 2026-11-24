@@ -5,12 +5,13 @@ A Qt client for OpenKnot with two modes:
 | Mode | Talks to | Status |
 |---|---|---|
 | **Proxy** (default) | your existing OpenKnot backend (`index.js`) over HTTP | complete — full API coverage |
-| **Direct** (`--direct`) | `wss://web.whatsapp.com` itself | transport + pairing done; message encryption pending |
+| **Direct** (`--direct`) | `wss://web.whatsapp.com` itself | text 1:1 + groups, media up/download, history sync |
 
-Proxy mode is the drop-in replacement for the J2ME client and runs on Symbian
-Qt 4.7 (HTTP only, no crypto). Direct mode is the Baileys-free path: the Qt app
-speaks WhatsApp's protocol without any server in between. See
-[`../QT_PORT.md`](../QT_PORT.md) for what direct mode still needs.
+Proxy mode is the drop-in replacement for the J2ME client. Direct mode is the
+Baileys-free path: the Qt app speaks WhatsApp's protocol without any server in
+between. Both build against **Qt 4.7.4** (Symbian) as well as Qt 5/6 — see
+[`../QT_PORT.md`](../QT_PORT.md) for the mapping and the remaining gaps
+(app state, presence privacy).
 
 ## Build
 
@@ -22,20 +23,31 @@ cmake --build build/qt
 ./build/qt/openknot-qt --url http://192.168.1.10:3000 --key YOUR_API_KEY
 ```
 
-Qt 5.4+ is required for direct mode (`QWebSocket`). Proxy mode needs only
-`QtCore` + `QtNetwork`.
+Qt 4.7.4 or newer: the only modules needed are `QtCore`, `QtGui` (Widgets) and
+`QtNetwork`. Anything newer than 4.7.4 is shimmed in `src/qt4compat/`:
+
+| Qt 5 API | Qt 4.7 replacement |
+|---|---|
+| `QJsonDocument/Object/Array/Value` (5.0) | `qt4compat/json.{h,cpp}` |
+| `QWebSocket` (5.3) | `qt4compat/websocket.cpp` (RFC 6455 on `QSslSocket`) |
+| functor `connect()` (5.0) | `SignalHook` in `qt4compat/qt4compat.h` |
+| `QHttpMultiPart` (4.8) | hand-built multipart body in `api_client.cpp` |
+| `QUrlQuery`, `QCommandLineParser` (5.x) | `QUrl::addQueryItem`, argv parsing |
+| `QStringLiteral`, `toHtmlEscaped`, `QDateTime::…SecsSinceEpoch` | `qt4compat.h` |
 
 ### Symbian / Qt 4.7
 
-Proxy mode only:
+```bash
+# verify the sources only use Qt 4.7.4 API (fetches the qt/qt 4.7 branch for
+# the real headers; no Qt installation needed)
+./qt/tests/qt4_check.sh
+```
 
-* replace `QJsonDocument` with a JSON shim (`api_client.cpp` is the only user),
-* drop `Qt::Sql`/`WebSockets` from `CMakeLists.txt`,
-* build with the Symbian Qt 4.7 toolchain (`qmake` + a `.pro` file is enough —
-  the sources have no Qt5-only APIs other than JSON).
-
-Direct mode on Symbian additionally needs a `QTcpSocket`-based WebSocket client
-(Qt < 5.4 has none) — see `QT_PORT.md` §5.
+The protocol code is C++11-clean (Symbian ships GCC 4.x); CMake defaults to
+C++17 on desktop and honours `-DCMAKE_CXX_STANDARD=11` for device builds.
+Direct mode needs TLS from the platform (Qt 4.7's `QSslSocket`); if the phone's
+root store is too old for WhatsApp's certificate chain you can opt in to
+ignoring certificate errors with `OPENKNOT_INSECURE_TLS=1`.
 
 ## Run
 
@@ -61,7 +73,11 @@ src/
   main.cpp              entry point + CLI
   models.h              Chat / Message / Contact / GroupInfo (mirrors serializers.js)
   api_client.*          proxy mode: every OpenKnot REST endpoint
-  mainwindow.*          UI: chat list, message view, send, QR dialog, log dock
+  mainwindow.*          UI: chat list, message view, send/attach/save-media, QR dialog
+  qt4compat/
+    json.*              QJson* for Qt 4.7 (parser + serialiser + COW value tree)
+    qt4compat.*         QStringLiteral/toHtmlEscaped shims + SignalHook (functor connects)
+    websocket.*         RFC 6455 WebSocket client over QSslSocket
   direct/
     whatsapp_direct.*   websocket lifecycle, handshake, stanza routing, QR pairing
     binary_node.*       BinaryNode codec (Baileys WABinary port, byte-exact)
@@ -77,7 +93,9 @@ src/
     wa_proto.*          WAProto subset: Message, HistorySync, notifications
     media_crypto.*      WhatsApp media keys + AES-CBC/HMAC blob crypto
     wa_history.*        HistorySync decrypt → inflate → parse → chats
-    wa_message.*        pre-key bundles, <message> build/parse, deviceSent
+    sender_key.*        group sender keys (skmsg): chains, XEdDSA, skipped keys
+    media_upload.*      CDN: media_conn, upload URL, encrypt/hash, downloads
+    wa_message.*        pre-key bundles, <message>/group metadata build/parse
 tests/
   run_tests.sh          builds + runs every core suite with host g++
   test_codec.cpp        BinaryNode codec + DEFLATE, vs real Baileys bytes
@@ -88,9 +106,15 @@ tests/
   test_signal.cpp       Signal sessions, interop with libsignal (3 phases)
   test_wa_proto.cpp     Message/HistorySync vs protobufjs, both directions
   test_history.cpp      real encrypted HistorySync blob → chats/messages
-  test_message.cpp      <message> stanza build/parse, interop with libsignal
+  test_message.cpp      <message> stanza build/parse + group stanzas, vs libsignal
+  test_sender_key.cpp   group sender keys vs Baileys' GroupCipher (3 phases)
+  test_media.cpp        upload/download crypto+URLs vs Baileys encryptedStream()
+  test_qt4compat.cpp    Qt 4-only: JSON shim round-trips (creds.json)
+  qt4_check.sh          compiles every Qt source against real Qt 4.7.4 headers
   verify_signal.mjs     phase 2 of test_signal (decrypts/encrypts via libsignal)
   verify_message.mjs    phase 2 of test_message (decodes the stanza, replies)
+  verify_group.mjs      phase 2 of test_sender_key (GroupCipher decrypt/reply)
+  verify_media.mjs      phase 2 of test_media (proto decode + CDN decrypt)
   gen_*.mjs             regenerate the vectors from Baileys (`--regen`)
   *_vectors.txt         checked-in vectors (Baileys 6.7.22)
 ```
@@ -117,8 +141,13 @@ BAILEYS_DIR=/path/to/node_modules/@whiskeysockets/baileys ./qt/tests/run_tests.s
 === WAProto ===            58 checks, 0 failed
 === history / media ===    59 checks, 0 failed
 === Signal (vs libsignal) ===       16 + 18 checks, 0 failed
-=== message layer (vs libsignal) === 29 + 18 checks, 0 failed
+=== message layer (vs libsignal) === 71 + 18 checks, 0 failed
+=== group sender keys (vs Baileys GroupCipher) === 42 + 10 checks, 0 failed
+=== media upload/download (vs Baileys) === 72 + 12 checks, 0 failed
 ```
+
+Eleven suites; `run_tests.sh` builds and runs them all with a plain host g++
+(no Qt needed).
 
 The Signal and message suites are three-phase: the C++ side encrypts, a Node
 script driving the real libsignal decrypts (and replies), then C++ decrypts the
@@ -149,7 +178,16 @@ presence/chatstate/receipt signals, credential persistence, 5-second reconnect
 - **History sync**: `HistorySyncNotification` → CDN download → media-key
   decrypt (HKDF + AES-256-CBC + HMAC) → inflate → `HistorySync` parse →
   chats, messages and pushnames in the chat list.
+- **Group messages**: `<iq xmlns=w:g2><query/></iq>` metadata, one sender-key
+  chain per group (`skmsg` body with XEdDSA signature), sender-key
+  distribution messages fanned out to devices that do not have them yet
+  (sender-key memory), skipped-key handling on receive, chains persisted in
+  `creds.json`.
+- **Media**: attach a file → fresh 32-byte mediaKey → `HKDF("WhatsApp <Type>
+  Keys")` → AES-256-CBC + 10-byte HMAC → `<iq xmlns=w:m><media_conn/></iq>` →
+  POST to the CDN → image/video/audio/document message with
+  `url/directPath/mediaKey/fileSha256/fileEncSha256/fileLength`. Downloads go
+  the other way (`File ▸ Save media from chat…`), MAC-verified before writing.
 
-Missing: groups (`skmsg` sender keys + group metadata), media upload/download
-in the UI, app state (mute/pin/archive), USync device lists (bundles are
-fetched per send). See `QT_PORT.md` §3 and §6.
+Missing: app state (mute/pin/archive), presence privacy, USync device lists
+(bundles are fetched per send). See `QT_PORT.md` §3 and §6.

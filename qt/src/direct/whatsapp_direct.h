@@ -2,7 +2,7 @@
 // WhatsAppDirect — DIRECT MODE: Qt app talks to wss://web.whatsapp.com itself.
 //
 // This replaces the Node backend for the *transport* half of Baileys:
-//   QWebSocket + Noise (curves/AES-GCM/SHA-256, all dependency-free here)
+//   RFC 6455 socket + Noise (curves/AES-GCM/SHA-256, all dependency-free here)
 //   + BinaryNode codec + handshake protobuf + QR pairing + reconnect/ping.
 //
 // It deliberately mirrors wa.js: the same high-level signals ApiClient emits

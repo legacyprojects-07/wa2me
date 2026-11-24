@@ -118,6 +118,7 @@ SOURCES=(
   qt/src/mainwindow.cpp
   qt/src/main.cpp
   qt/src/direct/whatsapp_direct.cpp
+  qt/tests/test_qt4compat.cpp
 )
 
 fail=0

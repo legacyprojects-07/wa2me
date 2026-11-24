@@ -54,7 +54,7 @@ WhatsApp Web's multi-device protocol in TypeScript (~50k lines). The stack:
 ├──────────────────────────────────────────────────────────────┤
 │ Noise Protocol (Noise_XX / Noise_IK, Curve25519, AES-GCM)  │  ← transport
 ├──────────────────────────────────────────────────────────────┤
-│ WebSocket wss://web.whatsapp.com + TLS 1.2+                │  ← QWebSocket
+│ WebSocket wss://web.whatsapp.com + TLS 1.2+                │  ← qt4compat
 └──────────────────────────────────────────────────────────────┘
 ```
 
@@ -66,19 +66,21 @@ performs a **Noise handshake** (`Noise_XX` for first connect, `Noise_IK` for
 resume) using Curve25519 + AES-256-GCM + SHA-256. Every frame after that is
 Noise-encrypted. Without this, WhatsApp drops the connection immediately.
 
-*Qt equivalent:* `QWebSocket` (Qt ≥ 5.4) + a Noise implementation.
-Qt has **no built-in Noise or Curve25519**. You need one of:
+*Qt equivalent:* a WebSocket client + a Noise implementation. Neither is a
+problem any more:
 
-- **libsodium** (`crypto_scalarmult`, `crypto_aead_aes256gcm` / `chacha20poly1305`) — recommended, small, portable.
-- **OpenSSL** (EVP) — available on desktop, harder on Symbian.
-- **libsignal-protocol-c** — also provides Signal (see §2.2), so if you link it
-  you get Curve25519 for free.
+- **WebSocket** — Qt only grew `QWebSocket` in 5.4, so `qt/src/qt4compat/
+  websocket.cpp` implements RFC 6455 directly on `QSslSocket` (HTTP upgrade
+  with `Origin`/`User-Agent`, masked client frames, fragmentation, ping/pong,
+  close, `Sec-WebSocket-Accept` verification). It works on Qt 4.7 and Qt 5/6.
+- **Noise + Curve25519 + AES-GCM + SHA-256** — hand-written in
+  `qt/src/direct/` (`noise.cpp`, `x25519.cpp`, `aes_gcm.cpp`, `sha256.cpp`)
+  and verified against Baileys' own `NoiseHandler`. No libsodium, no OpenSSL,
+  no Qt crypto module.
 
-> Symbian note: Qt 4.7 (the Symbian Qt) has **no `QWebSocket` at all**
-> (added in Qt 5.4). A direct connection on Symbian therefore needs either
-> a Qt 5 port for Symbian (unofficial) or a hand-rolled WebSocket client on
-> top of `QTcpSocket` + system TLS. The skeleton in `qt/src/direct/` uses
-> `QWebSocket` and documents the `QTcpSocket` fallback.
+> Symbian note: the whole stack therefore builds on stock Qt 4.7.4 —
+> `qt/tests/qt4_check.sh` compiles every Qt source against the real 4.7.4
+> headers to keep it that way.
 
 ### 2.2 End-to-end encryption — Signal Protocol
 
@@ -135,18 +137,18 @@ for the CDN fetch + libsodium/OpenSSL for AES-CBC/HMAC.
 
 ```
 qt/
-├── CMakeLists.txt              Qt5/Qt6 build (Widgets + Network + WebSockets + Sql)
+├── CMakeLists.txt              Qt4-first build (Core + Gui + Network; Qt5/6 also work)
 ├── README.md                   Build + run instructions
 └── src/
     ├── main.cpp                App entry, mode switch (proxy vs direct)
     ├── models.h                Chat / Message / Contact (mirrors serializers.js)
     ├── api_client.h/.cpp       PROXY MODE: full OpenKnot REST client (all endpoints)
     ├── mainwindow.h/.cpp       Chat list + message view + send box + QR dialog
+    ├── qt4compat/              Qt 4.7 back-port (JSON, RFC 6455 socket, SignalHook)
     └── direct/
-        ├── whatsapp_direct.h/.cpp   DIRECT MODE: QWebSocket + Noise skeleton,
-        │                            Baileys file-by-file mapping, TODOs
+        ├── whatsapp_direct.h/.cpp   DIRECT MODE: socket lifecycle, stanzas, pairing
         ├── binary_node.h/.cpp       BinaryNode encode/decode (ported, working)
-        └── noise_handshake.h/.cpp   Noise_XX/IK skeleton (needs libsodium)
+        └── noise.*, signal.*, …     Noise + Signal + WAProto, all dependency-free
 ```
 
 ### Proxy mode (works today, no server changes)
@@ -170,9 +172,10 @@ It is a drop-in Qt replacement for your J2ME client.
 
 ### Direct mode (transport implemented, verified against Baileys)
 
-`WhatsAppDirect` opens `wss://web.whatsapp.com/ws/chat` via `QWebSocket`, runs
-the real Noise handshake, and exposes the same high-level API as `ApiClient`
-(`sendText`, …) so `MainWindow` does not care which mode is active.
+`WhatsAppDirect` opens `wss://web.whatsapp.com/ws/chat` (RFC 6455 over
+`QSslSocket` — see §5), runs the real Noise handshake, and exposes the same
+high-level API as `ApiClient` (`sendText`, `sendMedia`, `downloadMedia`, …) so
+`MainWindow` does not care which mode is active.
 
 Implemented **and verified byte-for-byte against Baileys 6.7.22** (see
 `qt/tests/`):
@@ -210,19 +213,31 @@ Implemented **and verified byte-for-byte against Baileys 6.7.22** (see
 - ✅ **Send + history wired into the app**: one-time pre-key generation and
   upload, device-bundle fetch + 5-minute cache, text send, receipts, and
   `HistorySync` download → decrypt → inflate → parse → chat list
+- ✅ **Groups** (`src/direct/sender_key.cpp`,`wa_message.cpp`): `<iq
+  xmlns=w:g2><query/></iq>` metadata, one sender-key chain per (group, member),
+  `HKDF("WhisperGroup")` message keys, AES-256-CBC bodies signed with XEdDSA,
+  `SenderKeyDistributionMessage` fanned out to devices that lack it
+  (sender-key memory), skipped-key caching on receive (2000-message window),
+  chains persisted in `creds.json`. Baileys' own `GroupCipher` decrypts our
+  `skmsg` and we decrypt its (42 + 10 checks)
+- ✅ **Media** (`src/direct/media_upload.cpp`): `<iq xmlns=w:m><media_conn/></iq>`,
+  the exact CDN upload URL (base64url of `SHA-256(ciphertext‖MAC)`),
+  `prepareUpload` (fresh mediaKey → HKDF → AES-256-CBC + 10-byte HMAC →
+  `fileSha256`/`fileEncSha256`), image/video/audio/document messages with
+  `url`/`directPath`/`mediaKey`/`mediaKeyTimestamp`, and download →
+  MAC-verify → decrypt → file. Baileys' `encryptedStream()` produces the same
+  ciphertext and decrypts ours (72 + 12 checks)
+- ✅ **Qt 4.7.4**: every Qt API the client uses exists in 4.7.4 — verified by
+  compiling all Qt sources against the real 4.7.4 headers
+  (`qt/tests/qt4_check.sh`)
 
 Still missing:
 
-- ⚠️ **Group messages** (`skmsg`): sender-key distribution, group metadata
-  fetch. Direct-mode group *sending* reports a clear error instead of sending
-  a broken stanza; incoming group pre-key/whisper messages decrypt fine.
-- ⚠️ Media upload/download in the UI (the crypto primitives and URL builder are
-  in place; only the HTTP + thumbnail pipeline is missing).
 - ⚠️ App state (mute/pin/archive), presence privacy, USync device lists
-  (bundles are fetched per send instead).
+  (bundles are fetched per send instead), media thumbnails/streaming.
 
-**Honest estimate:** direct mode now *sends text and loads chat history*; what
-remains is groups, media and app state.
+**Honest estimate:** direct mode now sends and receives text (1:1 and groups),
+uploads and downloads media, and loads chat history — all on Qt 4.7.4 API.
 
 ## 4. Why not just "port wa.js line by line"?
 
@@ -241,8 +256,11 @@ The mapping table below is the work breakdown.
 | `src/WABinary/proto/*.proto` (Message, HistorySync, …) → `protoc` | hand-written `wa_proto.cpp` subset | done (subset) |
 | `src/Signal/libsignal.ts`, `auth-utils.ts` | `signal.cpp` (X3DH + ratchet) + `ed25519.cpp` (XEdDSA) | done (1:1) |
 | `src/Utils/history-sync.ts` | `wa_history.cpp` + `media_crypto.cpp` | done |
-| `src/Utils/messages-media.ts` | media AES-CBC/HMAC + CDN fetch (`aes_gcm.*` ready) | TODO |
+| `src/Utils/messages-media.ts` | `media_crypto.*` + `media_upload.*` + CDN HTTP in `whatsapp_direct.cpp` | **done** |
+| `src/Signal/Group/*` (sender keys) | `direct/sender_key.*` | **done + tested vs GroupCipher** |
 | `src/Utils/usync.ts`, `app-state.ts` | USync / app-state handlers | TODO |
+| `QWebSocket` (Qt 5.3) | `qt4compat/websocket.cpp` (RFC 6455 on `QSslSocket`) | **done** |
+| `QJson*` (Qt 5.0) | `qt4compat/json.*` | **done** |
 | `wa.js` (your code) | `MainWindow` + `ApiClient`/`WhatsAppDirect` | **ported (proxy)** |
 
 ## 5. Symbian + TLS 1.2 — what your note changes (and doesn't)
@@ -251,13 +269,16 @@ You confirmed the device supports **TLS 1.2 at system level**. That removes
 the most common Symbian blocker (Qt 4.7's bundled OpenSSL only does TLS 1.0,
 which WhatsApp rejects). Good — but three other Symbian hurdles remain:
 
-1. **No `QWebSocket` in Qt 4.7.** Direct mode needs Qt ≥ 5.4, or a custom
-   WebSocket-over-`QTcpSocket` client (framing is already isolated in
-   `noise::encodeFrame`/`decodeFrames`, so only the RFC 6455 layer is missing).
-   Proxy mode (HTTP only) works on Qt 4.7.
-2. **No `QJsonDocument` in Qt 4.7.** Proxy mode on Qt 4.7 needs a small JSON
-   parser (e.g. QScript or a bundled single-header parser). The Qt5 build in
-   `qt/` uses `QJsonDocument`; a Qt4 build swaps in a parser shim.
+1. ~~No `QWebSocket` in Qt 4.7.~~ Solved: `src/qt4compat/websocket.cpp` is an
+   RFC 6455 client on `QSslSocket` (TLS, HTTP upgrade, masked frames,
+   fragmentation, ping/pong, close, SHA-1 accept check). `QWebSocket` is no
+   longer used anywhere.
+2. ~~No `QJsonDocument` in Qt 4.7.~~ Solved: `src/qt4compat/json.{h,cpp}` is a
+   Qt5-compatible QJson* implementation (parser, serialiser, COW values),
+   tested by `qt/tests/test_qt4compat.cpp`. Other 4.8+/5 APIs that had crept
+   in (`QHttpMultiPart`, `QUrlQuery`, `QCommandLineParser`, `QStringLiteral`,
+   `toHtmlEscaped`, `…SecsSinceEpoch`, `QRandomGenerator`, functor `connect`)
+   are gone too — see `qt/tests/qt4_check.sh`.
 3. **Crypto libs.** This port removed the libsodium, zlib and protobuf
    dependencies for the whole transport: X25519, AES-256-GCM/CBC/CTR,
    SHA-256/HMAC/HKDF, raw DEFLATE and the handshake protobuf are plain C++ in
@@ -266,34 +287,38 @@ which WhatsApp rejects). Good — but three other Symbian hurdles remain:
    have to be cross-compiled for Symbian (armv5/armv6) — but that is one
    dependency instead of four. Proxy mode needs none of them.
 
-**Recommendation:** ship **proxy mode** for Symbian (it is complete and needs
-no crypto), and develop **direct mode** on desktop Qt5/Qt6 first. Once direct
-mode works on desktop, back-port the WebSocket + crypto layers to Symbian.
+**Recommendation:** both modes now build against Qt 4.7.4 headers. Ship proxy
+mode if the phone cannot do TLS 1.2 to `web.whatsapp.com`; direct mode otherwise
+(set `OPENKNOT_INSECURE_TLS=1` only if the device root store is too old for
+WhatsApp's chain).
 
 ## 6. Roadmap
 
 - [x] **Phase 1 — Qt proxy client** (`qt/`): full OpenKnot REST client + UI.
       Drop-in replacement for the J2ME client.
 - [x] **Phase 2 — Direct transport**: dependency-free Noise handshake +
-      `QWebSocket` to `wss://web.whatsapp.com`, QR pairing, reconnect.
+      WebSocket to `wss://web.whatsapp.com`, QR pairing, reconnect.
       Verified against Baileys by the suites in `qt/tests/`.
 - [x] **Phase 3 — Direct crypto**: hand-written Signal (X3DH + Double Ratchet),
       XEdDSA pre-key signatures, WAProto `Message`, 1:1 text send/receive.
       Verified against libsignal and protobufjs.
 - [x] **Phase 3b — Direct history**: `HistorySync` notification → CDN download →
       media-key decrypt → inflate → parse → chats/messages in the UI.
-- [ ] **Phase 4 — Groups + media + app state**: sender-key (`skmsg`) groups,
-      group metadata, media upload/download, app state patches, USync device
-      lists, `QtSql` store.
-- [ ] **Phase 5 — Symbian back-port**: Qt4 HTTP shim (done in Phase 1),
-      custom RFC 6455 WebSocket + cross-compiled libsignal for direct mode.
+- [x] **Phase 4 — Groups + media**: sender-key (`skmsg`) groups + group
+      metadata, media upload/download (CDN), verified against Baileys'
+      `GroupCipher` and `encryptedStream()`.
+- [x] **Phase 5 — Qt 4.7.4 back-port**: JSON shim, RFC 6455 WebSocket on
+      `QSslSocket`, functor-connect hook, multipart/CLI/query replacements;
+      `qt/tests/qt4_check.sh` compiles every Qt source against real 4.7.4
+      headers.
+- [ ] **Phase 6 — App state + USync**: mute/pin/archive patches, USync device
+      lists, media thumbnails, `QtSql` store.
 
 ## 8. Verification
 
 `qt/tests/run_tests.sh` compiles the Qt-free protocol code with the host g++
-(set `BAILEYS_DIR` to run the libsignal interop phases as well).
 and checks it against vectors generated from the real Baileys package and
-Node's `crypto`:
+Node's `crypto` (set `BAILEYS_DIR` to run the interop phases as well):
 
 | Suite | What it proves |
 |---|---|
@@ -305,7 +330,18 @@ Node's `crypto`:
 | `test_signal` | X3DH/Double Ratchet: libsignal decrypts our `PreKeyWhisperMessage` and we decrypt its replies (two-phase Node run) |
 | `test_wa_proto` | `Message`/`HistorySync`/`HistorySyncNotification` encode **and** decode match protobufjs byte-for-byte, including padding round-trips |
 | `test_history` | a real Baileys-produced `HistorySync` blob decrypts (HKDF + AES-CBC + 10-byte HMAC), inflates through the zlib wrapper and flattens into chats/messages/pushnames |
-| `test_message` | full message layer: parse the real `<iq xmlns=encrypt>` bundle node, build a `<message>` stanza, libsignal decrypts it (text + `deviceSentMessage`), and C++ decrypts libsignal's `pkmsg`/`msg` replies into the right chat |
+| `test_message` | full message layer: parse the real `<iq xmlns=encrypt>` bundle node, build a `<message>` stanza, libsignal decrypts it (text + `deviceSentMessage`), and C++ decrypts libsignal's `pkmsg`/`msg` replies into the right chat; also group stanzas (`skmsg` body + distribution fan-out, sender-key memory), group metadata parse and skmsg receive |
+| `test_sender_key` | Baileys' `GroupCipher` decrypts our `skmsg` (HKDF `WhisperGroup`, XEdDSA); we decrypt theirs including its skipped iterations (0, 2, 4…), reject replays/tampering/wrong key id, and re-key cleanly |
+| `test_media` | Baileys' `encryptedStream()` ciphertext/hashes for the same file+mediaKey are identical, the CDN path (`base64url(SHA-256(cipher‖MAC))`) and upload URL match, tampered blobs are rejected, and both directions decrypt; ImageMessage/DocumentMessage decode against protobufjs |
+| `qt4_check.sh` | every Qt source compiles against the real Qt 4.7.4 headers (`QT_VERSION 0x040704`) — no Qt 4.8+/5/6 API can creep back in |
+
+Eleven suites run with a plain host `g++`; three of them are three-phase
+(C++ → Node/libsignal-or-Baileys → C++). The Qt 4 check is separate because it
+needs the Qt 4.7.4 headers (fetched automatically):
+
+```bash
+./qt/tests/qt4_check.sh
+```
 
 Regenerate the vectors after a Baileys bump:
 
@@ -320,6 +356,7 @@ BAILEYS_DIR=/path/to/@whiskeysockets/baileys ./qt/tests/run_tests.sh --regen
 - Signal Protocol: <https://signal.org/docs/specifications/x3dh/>
 - libsignal-protocol-c: <https://github.com/Whisperfish/libsignal-protocol-c>
 - libsodium: <https://doc.libsodium.org/>
-- Qt WebSockets: <https://doc.qt.io/qt-5/qtwebsockets-index.html>
+- RFC 6455 (WebSocket): <https://datatracker.ietf.org/doc/html/rfc6455>
+- Qt 4.7.4 source (the header check): <https://github.com/qt/qt/tree/4.7>
 - Prior Qt WhatsApp attempts (WebEngine wrappers, **not** direct protocol):
   WhatSie, WhatsThat (archived 2019) — useful UI reference only.

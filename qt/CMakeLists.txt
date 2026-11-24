@@ -37,7 +37,7 @@ add_executable(openknot-qt
   src/qt4compat/json.cpp
   src/qt4compat/qt4compat.cpp
   src/qt4compat/websocket.cpp
-  # direct mode: transport stack (Qt-free internals + QWebSocket glue)
+  # direct mode: transport stack (Qt-free internals + WebSocket/JSON glue)
   src/direct/whatsapp_direct.cpp
   src/direct/binary_node.cpp
   src/direct/inflate.cpp
@@ -126,6 +126,14 @@ add_executable(test_sender_key tests/test_sender_key.cpp
   src/direct/sender_key.cpp src/direct/signal.cpp src/direct/ed25519.cpp
   src/direct/binary_node.cpp src/direct/inflate.cpp ${DIRECT_CORE})
 target_include_directories(test_sender_key PRIVATE src/direct)
+# Qt 4-only: exercises the JSON shim used for creds.json (needs real Qt 4).
+if(QT4_FOUND)
+  add_executable(test_qt4compat tests/test_qt4compat.cpp src/qt4compat/json.cpp)
+  target_include_directories(test_qt4compat PRIVATE src src/qt4compat)
+  target_link_libraries(test_qt4compat PRIVATE ${QT_LIBS})
+  add_test(NAME qt4compat COMMAND test_qt4compat)
+endif()
+
 add_test(NAME sender_key COMMAND test_sender_key
   ${CMAKE_CURRENT_SOURCE_DIR}/tests/sender_key_vectors.txt ${CMAKE_CURRENT_BINARY_DIR})
 
