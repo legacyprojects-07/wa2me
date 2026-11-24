@@ -255,7 +255,7 @@ void writeString(QByteArray &out, const QString &text) {
         default:
             if (u < 0x20) {
                 char buf[8];
-                std::snprintf(buf, sizeof(buf), "\\u%04x", unsigned(u));
+                snprintf(buf, sizeof(buf), "\\u%04x", unsigned(u));
                 out += buf;
             } else if (u < 0x80) {
                 out += char(u);
@@ -302,9 +302,9 @@ void writeValue(QByteArray &out, const NodePtr &node, bool indented, int depth) 
         char buf[32];
         const double value = node->number;
         if (value == double(qint64(value)) && std::abs(value) < 1e15)
-            std::snprintf(buf, sizeof(buf), "%lld", static_cast<long long>(value));
+            snprintf(buf, sizeof(buf), "%lld", static_cast<long long>(value));
         else
-            std::snprintf(buf, sizeof(buf), "%.17g", value);
+            snprintf(buf, sizeof(buf), "%.17g", value);
         out += buf;
         break;
     }

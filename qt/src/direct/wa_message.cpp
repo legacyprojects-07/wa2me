@@ -611,7 +611,7 @@ bool decodeMessageNode(const BinaryNode &node, const std::string &meJid,
         return false;
     }
     const std::string t = node.attrOr("t");
-    if (!t.empty()) out.timestamp = std::strtoull(t.c_str(), nullptr, 10);
+    if (!t.empty()) out.timestamp = strtoull(t.c_str(), nullptr, 10);
 
     if (isJidGroup(from) || isJidBroadcast(from)) {
         if (participant.empty()) {

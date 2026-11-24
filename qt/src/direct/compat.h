@@ -21,32 +21,32 @@ namespace compat {
 
 inline std::string toString(int v) {
     char buf[24];
-    std::snprintf(buf, sizeof buf, "%d", v);
+    snprintf(buf, sizeof buf, "%d", v);
     return std::string(buf);
 }
 inline std::string toString(unsigned int v) {
     char buf[24];
-    std::snprintf(buf, sizeof buf, "%u", v);
+    snprintf(buf, sizeof buf, "%u", v);
     return std::string(buf);
 }
 inline std::string toString(long v) {
     char buf[24];
-    std::snprintf(buf, sizeof buf, "%ld", v);
+    snprintf(buf, sizeof buf, "%ld", v);
     return std::string(buf);
 }
 inline std::string toString(unsigned long v) {
     char buf[24];
-    std::snprintf(buf, sizeof buf, "%lu", v);
+    snprintf(buf, sizeof buf, "%lu", v);
     return std::string(buf);
 }
 inline std::string toString(long long v) {
     char buf[24];
-    std::snprintf(buf, sizeof buf, "%lld", v);
+    snprintf(buf, sizeof buf, "%lld", v);
     return std::string(buf);
 }
 inline std::string toString(unsigned long long v) {
     char buf[24];
-    std::snprintf(buf, sizeof buf, "%llu", v);
+    snprintf(buf, sizeof buf, "%llu", v);
     return std::string(buf);
 }
 
@@ -57,7 +57,7 @@ inline bool parseUnsigned(const std::string &text, T &out) {
     if (text.empty()) return false;
     errno = 0;
     char *end = 0;
-    const unsigned long long value = std::strtoull(text.c_str(), &end, 10);
+    const unsigned long long value = strtoull(text.c_str(), &end, 10);
     if (errno != 0 || end == text.c_str()) return false;
     while (end && *end == ' ') ++end;
     if (end && *end != '\0') return false;
@@ -75,8 +75,8 @@ inline int hexNibble(char c) {
 
 // Entropy source for the RNG seed on toolchains without <chrono>.
 inline unsigned long long clockTicks() {
-    return static_cast<unsigned long long>(std::time(0)) ^
-           (static_cast<unsigned long long>(std::clock()) << 20);
+    return static_cast<unsigned long long>(time(0)) ^
+           (static_cast<unsigned long long>(clock()) << 20);
 }
 
 } // namespace compat
