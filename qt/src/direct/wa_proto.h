@@ -40,22 +40,31 @@ struct ContextInfo {
 };
 
 // Media metadata shared by image/video/audio/document/sticker messages.
+// Field numbers differ per message type; see WAProto.proto (ImageMessage,
+// VideoMessage, AudioMessage, DocumentMessage, StickerMessage).
 struct MediaInfo {
     std::string url;             // 1
-    std::string mimetype;        // 2
-    std::string caption;         // 3 (image) / 7 (video) / 3 (document=title)
+    std::string mimetype;        // 2 (5 for stickers)
+    std::string caption;         // image 3, video 7, document 20
+    std::string title;           // document 3
     Bytes fileSha256;
     uint64_t fileLength = 0;
-    uint32_t seconds = 0;
-    bool ptt = false;
+    uint32_t seconds = 0;        // audio/video
+    bool ptt = false;            // audio 6
+    bool gifPlayback = false;    // video 8
+    uint32_t height = 0;
+    uint32_t width = 0;
+    uint32_t pageCount = 0;      // document 6
     Bytes mediaKey;
     Bytes fileEncSha256;
     std::string directPath;
-    std::string fileName;        // document only
-    std::string title;           // document only
+    std::string fileName;        // document 8
+    int64_t mediaKeyTimestamp = 0;
     Bytes jpegThumbnail;         // 16
     ContextInfo contextInfo;     // 17
     bool hasContextInfo = false;
+
+    bool empty() const { return url.empty() && mediaKey.empty() && !fileLength; }
 };
 
 struct Reaction {

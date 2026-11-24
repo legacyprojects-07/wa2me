@@ -36,51 +36,71 @@ void decodeContextInfo(const Bytes &data, ContextInfo &out) {
     }
 }
 
-// Encodes image/video/audio/document/sticker. `kind` selects the layout
-// differences documented in WAProto.proto.
+// Encodes image/video/audio/document/sticker. `kind` selects the field
+// layout documented in WAProto.proto (the numbers differ per message type).
 Bytes encodeMedia(const MediaInfo &m, int kind) {
     proto::Writer w;
     if (!m.url.empty()) w.fieldString(1, m.url);
-    if (!m.mimetype.empty()) w.fieldString(2, m.mimetype);
+    if (kind != 26 && !m.mimetype.empty()) w.fieldString(2, m.mimetype);
 
-    // caption / title position per message type
-    if (kind == 3 /*image*/ || kind == 9 /*video*/) {
+    switch (kind) {
+    case 3:   // ImageMessage
         if (!m.caption.empty()) w.fieldString(3, m.caption);
         if (!m.fileSha256.empty()) w.fieldBytes(4, m.fileSha256);
         if (m.fileLength) w.fieldVarint(5, m.fileLength);
-        if (kind == 3) {
-            if (m.mediaKey.size()) w.fieldBytes(8, m.mediaKey);
-            if (!m.fileEncSha256.empty()) w.fieldBytes(9, m.fileEncSha256);
-            if (!m.directPath.empty()) w.fieldString(11, m.directPath);
-        } else {
-            if (m.mediaKey.size()) w.fieldBytes(6, m.mediaKey);
-            if (!m.caption.empty()) w.fieldString(7, m.caption);
-            if (!m.fileEncSha256.empty()) w.fieldBytes(11, m.fileEncSha256);
-            if (!m.directPath.empty()) w.fieldString(13, m.directPath);
-        }
-    } else if (kind == 8 /*audio*/) {
+        if (m.height) w.fieldVarint(6, m.height);
+        if (m.width) w.fieldVarint(7, m.width);
+        if (!m.mediaKey.empty()) w.fieldBytes(8, m.mediaKey);
+        if (!m.fileEncSha256.empty()) w.fieldBytes(9, m.fileEncSha256);
+        if (!m.directPath.empty()) w.fieldString(11, m.directPath);
+        if (m.mediaKeyTimestamp) w.fieldVarint(12, uint64_t(m.mediaKeyTimestamp));
+        break;
+    case 7:   // DocumentMessage
+        if (!m.title.empty()) w.fieldString(3, m.title);
+        if (!m.fileSha256.empty()) w.fieldBytes(4, m.fileSha256);
+        if (m.fileLength) w.fieldVarint(5, m.fileLength);
+        if (m.pageCount) w.fieldVarint(6, m.pageCount);
+        if (!m.mediaKey.empty()) w.fieldBytes(7, m.mediaKey);
+        if (!m.fileName.empty()) w.fieldString(8, m.fileName);
+        if (!m.fileEncSha256.empty()) w.fieldBytes(9, m.fileEncSha256);
+        if (!m.directPath.empty()) w.fieldString(10, m.directPath);
+        if (m.mediaKeyTimestamp) w.fieldVarint(11, uint64_t(m.mediaKeyTimestamp));
+        if (!m.caption.empty()) w.fieldString(20, m.caption);
+        break;
+    case 8:   // AudioMessage
         if (!m.fileSha256.empty()) w.fieldBytes(3, m.fileSha256);
         if (m.fileLength) w.fieldVarint(4, m.fileLength);
         if (m.seconds) w.fieldVarint(5, m.seconds);
         if (m.ptt) w.fieldBool(6, true);
-        if (m.mediaKey.size()) w.fieldBytes(7, m.mediaKey);
+        if (!m.mediaKey.empty()) w.fieldBytes(7, m.mediaKey);
         if (!m.fileEncSha256.empty()) w.fieldBytes(8, m.fileEncSha256);
         if (!m.directPath.empty()) w.fieldString(9, m.directPath);
-    } else if (kind == 7 /*document*/) {
-        if (!m.title.empty()) w.fieldString(3, m.title);
-        if (!m.fileSha256.empty()) w.fieldBytes(4, m.fileSha256);
-        if (m.fileLength) w.fieldVarint(5, m.fileLength);
-        if (m.mediaKey.size()) w.fieldBytes(7, m.mediaKey);
-        if (!m.fileName.empty()) w.fieldString(8, m.fileName);
-        if (!m.fileEncSha256.empty()) w.fieldBytes(9, m.fileEncSha256);
-        if (!m.directPath.empty()) w.fieldString(10, m.directPath);
-    } else {   // sticker
+        if (m.mediaKeyTimestamp) w.fieldVarint(10, uint64_t(m.mediaKeyTimestamp));
+        break;
+    case 9:   // VideoMessage
+        if (!m.fileSha256.empty()) w.fieldBytes(3, m.fileSha256);
+        if (m.fileLength) w.fieldVarint(4, m.fileLength);
+        if (m.seconds) w.fieldVarint(5, m.seconds);
+        if (!m.mediaKey.empty()) w.fieldBytes(6, m.mediaKey);
+        if (!m.caption.empty()) w.fieldString(7, m.caption);
+        if (m.gifPlayback) w.fieldBool(8, true);
+        if (m.height) w.fieldVarint(9, m.height);
+        if (m.width) w.fieldVarint(10, m.width);
+        if (!m.fileEncSha256.empty()) w.fieldBytes(11, m.fileEncSha256);
+        if (!m.directPath.empty()) w.fieldString(13, m.directPath);
+        if (m.mediaKeyTimestamp) w.fieldVarint(14, uint64_t(m.mediaKeyTimestamp));
+        break;
+    default:   // StickerMessage
         if (!m.fileSha256.empty()) w.fieldBytes(2, m.fileSha256);
         if (!m.fileEncSha256.empty()) w.fieldBytes(3, m.fileEncSha256);
-        if (m.mediaKey.size()) w.fieldBytes(4, m.mediaKey);
+        if (!m.mediaKey.empty()) w.fieldBytes(4, m.mediaKey);
         if (!m.mimetype.empty()) w.fieldString(5, m.mimetype);
+        if (m.height) w.fieldVarint(6, m.height);
+        if (m.width) w.fieldVarint(7, m.width);
         if (!m.directPath.empty()) w.fieldString(8, m.directPath);
         if (m.fileLength) w.fieldVarint(9, m.fileLength);
+        if (m.mediaKeyTimestamp) w.fieldVarint(10, uint64_t(m.mediaKeyTimestamp));
+        break;
     }
 
     if (!m.jpegThumbnail.empty()) w.fieldBytes(16, m.jpegThumbnail);
@@ -92,43 +112,91 @@ void decodeMedia(const Bytes &data, int kind, MediaInfo &out) {
     proto::Reader r(data);
     proto::Field f;
     while (r.next(f)) {
-        switch (f.number) {
-        case 1: out.url.assign(f.bytes.begin(), f.bytes.end()); break;
-        case 2: out.mimetype.assign(f.bytes.begin(), f.bytes.end()); break;
-        case 3:
-            if (kind == 7) out.title.assign(f.bytes.begin(), f.bytes.end());
-            else out.caption.assign(f.bytes.begin(), f.bytes.end());
-            break;
-        case 4: out.fileSha256 = f.bytes; break;
-        case 5: out.fileLength = f.varint; break;
-        case 6:
-            if (kind == 8) out.ptt = f.varint != 0;
-            else out.mediaKey = f.bytes;
-            break;
-        case 7:
-            if (kind == 7) out.mediaKey = f.bytes;
-            else out.caption.assign(f.bytes.begin(), f.bytes.end());
-            break;
-        case 8:
-            if (kind == 7) out.fileName.assign(f.bytes.begin(), f.bytes.end());
-            else if (kind == 8) out.fileEncSha256 = f.bytes;
-            else out.mediaKey = f.bytes;
-            break;
-        case 9:
-            if (kind == 3) out.fileEncSha256 = f.bytes;
-            else out.directPath.assign(f.bytes.begin(), f.bytes.end());
-            break;
-        case 11:
-            if (kind == 3) out.directPath.assign(f.bytes.begin(), f.bytes.end());
-            else if (kind == 9) out.fileEncSha256 = f.bytes;
-            break;
-        case 13: out.directPath.assign(f.bytes.begin(), f.bytes.end()); break;
-        case 16: out.jpegThumbnail = f.bytes; break;
-        case 17:
+        // Common single-use fields.
+        if (f.number == 1) { out.url.assign(f.bytes.begin(), f.bytes.end()); continue; }
+        if (f.number == 16) { out.jpegThumbnail = f.bytes; continue; }
+        if (f.number == 17) {
             out.hasContextInfo = true;
             decodeContextInfo(f.bytes, out.contextInfo);
+            continue;
+        }
+        switch (kind) {
+        case 3:   // ImageMessage
+            switch (f.number) {
+            case 2: out.mimetype.assign(f.bytes.begin(), f.bytes.end()); break;
+            case 3: out.caption.assign(f.bytes.begin(), f.bytes.end()); break;
+            case 4: out.fileSha256 = f.bytes; break;
+            case 5: out.fileLength = f.varint; break;
+            case 6: out.height = uint32_t(f.varint); break;
+            case 7: out.width = uint32_t(f.varint); break;
+            case 8: out.mediaKey = f.bytes; break;
+            case 9: out.fileEncSha256 = f.bytes; break;
+            case 11: out.directPath.assign(f.bytes.begin(), f.bytes.end()); break;
+            case 12: out.mediaKeyTimestamp = int64_t(f.varint); break;
+            default: break;
+            }
             break;
-        default: break;
+        case 7:   // DocumentMessage
+            switch (f.number) {
+            case 2: out.mimetype.assign(f.bytes.begin(), f.bytes.end()); break;
+            case 3: out.title.assign(f.bytes.begin(), f.bytes.end()); break;
+            case 4: out.fileSha256 = f.bytes; break;
+            case 5: out.fileLength = f.varint; break;
+            case 6: out.pageCount = uint32_t(f.varint); break;
+            case 7: out.mediaKey = f.bytes; break;
+            case 8: out.fileName.assign(f.bytes.begin(), f.bytes.end()); break;
+            case 9: out.fileEncSha256 = f.bytes; break;
+            case 10: out.directPath.assign(f.bytes.begin(), f.bytes.end()); break;
+            case 11: out.mediaKeyTimestamp = int64_t(f.varint); break;
+            case 20: out.caption.assign(f.bytes.begin(), f.bytes.end()); break;
+            default: break;
+            }
+            break;
+        case 8:   // AudioMessage
+            switch (f.number) {
+            case 2: out.mimetype.assign(f.bytes.begin(), f.bytes.end()); break;
+            case 3: out.fileSha256 = f.bytes; break;
+            case 4: out.fileLength = f.varint; break;
+            case 5: out.seconds = uint32_t(f.varint); break;
+            case 6: out.ptt = f.varint != 0; break;
+            case 7: out.mediaKey = f.bytes; break;
+            case 8: out.fileEncSha256 = f.bytes; break;
+            case 9: out.directPath.assign(f.bytes.begin(), f.bytes.end()); break;
+            case 10: out.mediaKeyTimestamp = int64_t(f.varint); break;
+            default: break;
+            }
+            break;
+        case 9:   // VideoMessage
+            switch (f.number) {
+            case 2: out.mimetype.assign(f.bytes.begin(), f.bytes.end()); break;
+            case 3: out.fileSha256 = f.bytes; break;
+            case 4: out.fileLength = f.varint; break;
+            case 5: out.seconds = uint32_t(f.varint); break;
+            case 6: out.mediaKey = f.bytes; break;
+            case 7: out.caption.assign(f.bytes.begin(), f.bytes.end()); break;
+            case 8: out.gifPlayback = f.varint != 0; break;
+            case 9: out.height = uint32_t(f.varint); break;
+            case 10: out.width = uint32_t(f.varint); break;
+            case 11: out.fileEncSha256 = f.bytes; break;
+            case 13: out.directPath.assign(f.bytes.begin(), f.bytes.end()); break;
+            case 14: out.mediaKeyTimestamp = int64_t(f.varint); break;
+            default: break;
+            }
+            break;
+        default:  // StickerMessage
+            switch (f.number) {
+            case 2: out.fileSha256 = f.bytes; break;
+            case 3: out.fileEncSha256 = f.bytes; break;
+            case 4: out.mediaKey = f.bytes; break;
+            case 5: out.mimetype.assign(f.bytes.begin(), f.bytes.end()); break;
+            case 6: out.height = uint32_t(f.varint); break;
+            case 7: out.width = uint32_t(f.varint); break;
+            case 8: out.directPath.assign(f.bytes.begin(), f.bytes.end()); break;
+            case 9: out.fileLength = f.varint; break;
+            case 10: out.mediaKeyTimestamp = int64_t(f.varint); break;
+            default: break;
+            }
+            break;
         }
     }
 }
@@ -173,11 +241,11 @@ std::string Message::text() const {
 }
 
 std::string Message::mediaType() const {
-    if (!image.url.empty() || !image.mediaKey.empty()) return "image";
-    if (!video.url.empty() || !video.mediaKey.empty()) return "video";
-    if (!audio.url.empty() || !audio.mediaKey.empty()) return "audio";
-    if (!document.url.empty() || !document.mediaKey.empty()) return "document";
-    if (!sticker.url.empty() || !sticker.mediaKey.empty()) return "sticker";
+    if (!image.empty()) return "image";
+    if (!video.empty()) return "video";
+    if (!audio.empty()) return "audio";
+    if (!document.empty()) return "document";
+    if (!sticker.empty()) return "sticker";
     return std::string();
 }
 
@@ -192,14 +260,10 @@ Bytes encodeMessage(const Message &m) {
             skd.fieldBytes(2, m.senderKeyDistribution.axolotl);
         w.fieldMessage(2, skd.data());
     }
-    if (!m.image.url.empty() || !m.image.mediaKey.empty())
-        w.fieldMessage(3, encodeMedia(m.image, 3));
-    if (!m.document.url.empty() || !m.document.mediaKey.empty())
-        w.fieldMessage(7, encodeMedia(m.document, 7));
-    if (!m.audio.url.empty() || !m.audio.mediaKey.empty())
-        w.fieldMessage(8, encodeMedia(m.audio, 8));
-    if (!m.video.url.empty() || !m.video.mediaKey.empty())
-        w.fieldMessage(9, encodeMedia(m.video, 9));
+    if (!m.image.empty()) w.fieldMessage(3, encodeMedia(m.image, 3));
+    if (!m.document.empty()) w.fieldMessage(7, encodeMedia(m.document, 7));
+    if (!m.audio.empty()) w.fieldMessage(8, encodeMedia(m.audio, 8));
+    if (!m.video.empty()) w.fieldMessage(9, encodeMedia(m.video, 9));
     if (m.hasExtendedText) {
         proto::Writer ext;
         ext.fieldString(1, m.extendedText);
@@ -212,8 +276,7 @@ Bytes encodeMessage(const Message &m) {
         p.fieldVarint(2, m.protocolType);
         w.fieldMessage(12, p.data());
     }
-    if (!m.sticker.url.empty() || !m.sticker.mediaKey.empty())
-        w.fieldMessage(26, encodeMedia(m.sticker, 26));
+    if (!m.sticker.empty()) w.fieldMessage(26, encodeMedia(m.sticker, 26));
     if (m.hasDeviceSent) {
         proto::Writer ds;
         if (!m.deviceSentDestinationJid.empty())

@@ -184,11 +184,11 @@ bool encryptForDevice(signal::Store &store, const DeviceBundle &device,
     return true;
 }
 
-bool buildTextStanza(signal::Store &store, const std::string &meJid,
-                     const std::string &chatJid, const std::string &text,
-                     const std::string &msgId,
-                     const std::vector<DeviceBundle> &bundles, SendPlan &out,
-                     std::string &error) {
+bool buildMessageStanza(signal::Store &store, const std::string &meJid,
+                        const std::string &chatJid, const waproto::Message &message,
+                        const std::string &msgId,
+                        const std::vector<DeviceBundle> &bundles, SendPlan &out,
+                        std::string &error) {
     out = SendPlan();
     if (bundles.empty()) {
         error = "no device bundles to encrypt for";
@@ -198,9 +198,6 @@ bool buildTextStanza(signal::Store &store, const std::string &meJid,
         error = "empty chat jid";
         return false;
     }
-
-    waproto::Message message;
-    if (!text.empty()) message.conversation = text;
 
     BinaryNode participants("participants");
     for (const auto &bundle : bundles) {
@@ -221,10 +218,21 @@ bool buildTextStanza(signal::Store &store, const std::string &meJid,
 
     out.stanza = BinaryNode("message");
     out.stanza.setAttr("id", msgId);
-    out.stanza.setAttr("type", "text");
+    // Media messages are sent with type "media" (Baileys uses the chat type).
+    out.stanza.setAttr("type", message.mediaType().empty() ? "text" : "media");
     out.stanza.setAttr("to", chatJid);
     out.stanza.addChild(participants);
     return true;
+}
+
+bool buildTextStanza(signal::Store &store, const std::string &meJid,
+                     const std::string &chatJid, const std::string &text,
+                     const std::string &msgId,
+                     const std::vector<DeviceBundle> &bundles, SendPlan &out,
+                     std::string &error) {
+    waproto::Message message;
+    if (!text.empty()) message.conversation = text;
+    return buildMessageStanza(store, meJid, chatJid, message, msgId, bundles, out, error);
 }
 
 // ── Group metadata (w:g2) ─────────────────────────────────────────────────
@@ -266,12 +274,12 @@ bool parseGroupMetadata(const BinaryNode &iq, GroupInfo &out, std::string &error
 
 // ── Group sending (sender keys) ───────────────────────────────────────────
 
-bool buildGroupTextStanza(signal::Store &sessions, signal::SenderKeyStore &senderKeys,
-                          const std::string &meJid, const std::string &groupJid,
-                          const std::string &text, const std::string &msgId,
-                          const std::vector<DeviceBundle> &bundles,
-                          const std::set<std::string> &alreadyDistributed,
-                          GroupSendPlan &out, std::string &error) {
+bool buildGroupMessageStanza(signal::Store &sessions, signal::SenderKeyStore &senderKeys,
+                             const std::string &meJid, const std::string &groupJid,
+                             const waproto::Message &message, const std::string &msgId,
+                             const std::vector<DeviceBundle> &bundles,
+                             const std::set<std::string> &alreadyDistributed,
+                             GroupSendPlan &out, std::string &error) {
     out = GroupSendPlan();
     if (bundles.empty()) {
         error = "no device bundles for group members";
@@ -286,8 +294,6 @@ bool buildGroupTextStanza(signal::Store &sessions, signal::SenderKeyStore &sende
     signal::SenderKeyDistribution dist;
     if (!signal::createSenderKey(senderKeys, groupJid, meJid, dist, error)) return false;
 
-    waproto::Message message;
-    if (!text.empty()) message.conversation = text;
     const Bytes padded = waproto::padMessage(waproto::encodeMessage(message));
 
     Bytes skmsg;
@@ -297,7 +303,7 @@ bool buildGroupTextStanza(signal::Store &sessions, signal::SenderKeyStore &sende
 
     BinaryNode stanza("message");
     stanza.setAttr("id", msgId);
-    stanza.setAttr("type", "text");
+    stanza.setAttr("type", message.mediaType().empty() ? "text" : "media");
     stanza.setAttr("to", groupJid);
 
     // The body itself, encrypted once with our sender key.
@@ -333,6 +339,18 @@ bool buildGroupTextStanza(signal::Store &sessions, signal::SenderKeyStore &sende
 
     out.stanza = stanza;
     return true;
+}
+
+bool buildGroupTextStanza(signal::Store &sessions, signal::SenderKeyStore &senderKeys,
+                          const std::string &meJid, const std::string &groupJid,
+                          const std::string &text, const std::string &msgId,
+                          const std::vector<DeviceBundle> &bundles,
+                          const std::set<std::string> &alreadyDistributed,
+                          GroupSendPlan &out, std::string &error) {
+    waproto::Message message;
+    if (!text.empty()) message.conversation = text;
+    return buildGroupMessageStanza(sessions, senderKeys, meJid, groupJid, message, msgId,
+                                   bundles, alreadyDistributed, out, error);
 }
 
 // ── Incoming messages ─────────────────────────────────────────────────────

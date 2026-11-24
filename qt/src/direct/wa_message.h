@@ -77,8 +77,15 @@ struct SendPlan {
     size_t deviceCount = 0;
 };
 
-// Encrypts `text` for every bundle and assembles the <message> stanza.
+// Encrypts a Message for every bundle and assembles the <message> stanza.
 // Copies addressed to our own devices are wrapped in deviceSentMessage.
+bool buildMessageStanza(signal::Store &store, const std::string &meJid,
+                        const std::string &chatJid, const waproto::Message &message,
+                        const std::string &msgId,
+                        const std::vector<DeviceBundle> &bundles, SendPlan &out,
+                        std::string &error);
+
+// Encrypts `text` for every bundle and assembles the <message> stanza.
 bool buildTextStanza(signal::Store &store, const std::string &meJid,
                      const std::string &chatJid, const std::string &text,
                      const std::string &msgId,
@@ -95,6 +102,14 @@ struct GroupSendPlan {
     size_t deviceCount = 0;
 };
 
+bool buildGroupMessageStanza(signal::Store &sessions, signal::SenderKeyStore &senderKeys,
+                             const std::string &meJid, const std::string &groupJid,
+                             const waproto::Message &message, const std::string &msgId,
+                             const std::vector<DeviceBundle> &bundles,
+                             const std::set<std::string> &alreadyDistributed,
+                             GroupSendPlan &out, std::string &error);
+
+// Text convenience wrapper around buildGroupMessageStanza.
 bool buildGroupTextStanza(signal::Store &sessions, signal::SenderKeyStore &senderKeys,
                           const std::string &meJid, const std::string &groupJid,
                           const std::string &text, const std::string &msgId,

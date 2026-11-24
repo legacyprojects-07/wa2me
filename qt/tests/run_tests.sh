@@ -16,6 +16,7 @@
 #   message     end-to-end <message> stanza build/parse against libsignal*,
 #               plus group (sender-key) stanza build/decrypt
 #   sender_key  group sender keys against Baileys' GroupCipher*
+#   media       media upload/download (CDN keys, hashes, URLs) against Baileys
 #
 # * signal and message run three phases: the C++ side encrypts, a Node script
 #   using the real libsignal decrypts and replies, then C++ decrypts the reply.
@@ -39,7 +40,7 @@ if [[ "${1:-}" == "--regen" ]]; then
   ( cd "$T" && node gen_vectors.mjs && node gen_crypto.mjs && node gen_proto.mjs &&
       node gen_noise.mjs && node gen_sig.mjs && node gen_wa_proto.mjs &&
       node gen_history.mjs && node gen_signal.mjs && node gen_message.mjs &&
-      node gen_sender_key.mjs )
+      node gen_sender_key.mjs && node gen_media.mjs )
 fi
 
 echo "== building test suites =="
@@ -57,6 +58,8 @@ $CXX $CFLAGS $T/test_message.cpp $SRC/wa_message.cpp $SRC/signal.cpp $SRC/ed2551
     -o "$OUT/test_message"
 $CXX $CFLAGS $T/test_sender_key.cpp $SRC/sender_key.cpp $SRC/signal.cpp $SRC/ed25519.cpp \
     $SRC/binary_node.cpp $SRC/inflate.cpp $COMMON -o "$OUT/test_sender_key"
+$CXX $CFLAGS $T/test_media.cpp $SRC/media_upload.cpp $SRC/media_crypto.cpp \
+    $SRC/wa_proto.cpp $SRC/binary_node.cpp $SRC/inflate.cpp $COMMON -o "$OUT/test_media"
 
 echo
 "$OUT/test_codec" $T/vectors.txt
@@ -67,6 +70,7 @@ echo
 "$OUT/test_wa_proto" $T/wa_proto_vectors.txt
 "$OUT/test_history" $T/history_vectors.txt
 "$OUT/test_sender_key" $T/sender_key_vectors.txt "$OUT"
+"$OUT/test_media" $T/media_vectors.txt "$OUT"
 
 # ── Signal interop: C++ -> libsignal -> C++ ────────────────────────────────
 if [[ -n "${BAILEYS_DIR:-}" ]]; then
@@ -89,8 +93,16 @@ if [[ -n "${BAILEYS_DIR:-}" ]]; then
   echo "== Group sender-key interop =="
   rm -f "$OUT/cpp_group.txt" "$OUT/node_group.txt"
   "$OUT/test_sender_key" $T/sender_key_vectors.txt "$OUT"
+"$OUT/test_media" $T/media_vectors.txt "$OUT"
   node "$T/verify_group.mjs" $T/sender_key_vectors.txt "$OUT"
   "$OUT/test_sender_key" $T/sender_key_vectors.txt "$OUT" "$OUT"
+
+  echo
+  echo "== Media upload/download interop =="
+  rm -f "$OUT/cpp_media.txt" "$OUT/node_media.txt"
+  "$OUT/test_media" $T/media_vectors.txt "$OUT"
+  node "$T/verify_media.mjs" $T/media_vectors.txt "$OUT"
+  "$OUT/test_media" $T/media_vectors.txt "$OUT" "$OUT"
 else
   echo
   echo "!! BAILEYS_DIR is unset: skipping the libsignal interop phases"

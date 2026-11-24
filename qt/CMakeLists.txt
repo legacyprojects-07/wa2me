@@ -35,6 +35,7 @@ add_executable(openknot-qt
   src/direct/wa_history.cpp
   src/direct/wa_message.cpp
   src/direct/sender_key.cpp
+  src/direct/media_upload.cpp
 )
 
 target_include_directories(openknot-qt PRIVATE src src/direct)
@@ -102,6 +103,13 @@ target_include_directories(test_sender_key PRIVATE src/direct)
 add_test(NAME sender_key COMMAND test_sender_key
   ${CMAKE_CURRENT_SOURCE_DIR}/tests/sender_key_vectors.txt ${CMAKE_CURRENT_BINARY_DIR})
 
+add_executable(test_media tests/test_media.cpp
+  src/direct/media_upload.cpp src/direct/media_crypto.cpp src/direct/wa_proto.cpp
+  src/direct/binary_node.cpp src/direct/inflate.cpp ${DIRECT_CORE})
+target_include_directories(test_media PRIVATE src/direct)
+add_test(NAME media COMMAND test_media
+  ${CMAKE_CURRENT_SOURCE_DIR}/tests/media_vectors.txt ${CMAKE_CURRENT_BINARY_DIR})
+
 add_executable(test_codec tests/test_codec.cpp src/direct/binary_node.cpp src/direct/inflate.cpp)
 target_include_directories(test_codec PRIVATE src/direct)
 
@@ -115,7 +123,7 @@ add_executable(test_noise tests/test_noise.cpp src/direct/noise.cpp ${DIRECT_COR
 target_include_directories(test_noise PRIVATE src/direct)
 
 foreach(tc test_codec test_crypto test_proto test_noise test_ed25519 test_signal
-          test_wa_proto test_history test_message test_sender_key)
+          test_wa_proto test_history test_message test_sender_key test_media)
   target_compile_options(${tc} PRIVATE -Wall -Wextra)
 endforeach()
 
