@@ -13,7 +13,8 @@
 //   WORKING   : websocket lifecycle, Noise handshake, framing, QR pairing
 //               payloads, stream error handling, keepalive, stanza routing,
 //               1:1 text send/receive (Signal), group send/receive
-//               (sender keys, skmsg), HistorySync download+decode
+//               (sender keys, skmsg), media upload/download (CDN),
+//               HistorySync download+decode
 //   TODO      : app state (mute/pin/archive), presence privacy.
 
 #include <QObject>
@@ -33,6 +34,7 @@
 #include "binary_node.h"
 #include "models.h"
 #include "noise.h"
+#include "media_upload.h"
 #include "sender_key.h"
 #include "signal.h"
 #include "wa_history.h"
@@ -73,6 +75,18 @@ public slots:
     // Failures are reported through sendResult().
     void sendText(const QString &jid, const QString &text);
 
+    // Media send: encrypt the file with a fresh mediaKey, POST it to the CDN
+    // (media_conn -> upload URL), then send an image/video/audio/document
+    // message carrying url + directPath + mediaKey + hashes. Groups use the
+    // sender-key path like text does.
+    void sendMedia(const QString &jid, const QString &filePath,
+                   const QString &caption = QString());
+
+    // Media download: fetch the message's CDN url, verify + decrypt it and
+    // write `savePath`. Reports through mediaSaved()/mediaFailed().
+    bool downloadMedia(const QString &chatJid, const QString &msgId,
+                       const QString &savePath);
+
 signals:
     // Connection lifecycle
     void connectionUpdate(const QString &state, const QString &reason);
@@ -95,6 +109,9 @@ signals:
     void historySyncReceived(int progress, int chats, int messages);
 
     void sendResult(const QString &id, bool ok, const QString &error);
+    void mediaSaved(const QString &chatJid, const QString &msgId, const QString &path);
+    void mediaFailed(const QString &chatJid, const QString &msgId, const QString &error);
+    void mediaProgress(const QString &msgId, const QString &stage);
     void logLine(const QString &line);
 
 private slots:
@@ -138,6 +155,14 @@ private:
     void finishSend(const QString &iqId, const wa::BinaryNode &iqNode);
     void sendWithBundles(const PendingSend &pending,
                          std::vector<wa::messaging::DeviceBundle> devices);
+    // Media plumbing (CDN).
+    void enqueueSend(const PendingSend &pending);
+    void startMediaUpload(const PendingSend &pending);
+    void finishMediaUpload(const QString &uploadId, const QByteArray &body,
+                           const QString &errorText);
+    void registerMedia(const QString &msgId, wa::media::Type type,
+                       const wa::waproto::MediaInfo &info);
+
     void requestGroupMetadata(const PendingSend &pending);
     void fetchGroupBundles(const PendingSend &pending,
                            const wa::messaging::GroupInfo &info);
@@ -154,6 +179,17 @@ private:
         QString text;
         QString msgId;
         bool isGroup = false;
+        // Media sends carry a fully assembled message (built after the upload
+        // completes) instead of `text`.
+        bool isMedia = false;
+        wa::waproto::Message payload;
+    };
+    // An upload in flight: the send waits until the CDN hands back a URL.
+    struct PendingUpload {
+        PendingSend send;
+        wa::media::Type type = wa::media::Type::Document;
+        wa::media::UploadedMedia uploaded;
+        wa::media::MediaMeta meta;
     };
     struct CachedBundles {
         qint64 fetchedAt = 0;
@@ -165,6 +201,11 @@ private:
     QNetworkAccessManager *m_net = nullptr;
     QHash<QString, PendingSend> m_pendingSends;   // iq id -> queued message
     QHash<QString, CachedBundles> m_bundleCache;  // user jid -> device bundles
+    wa::media::MediaConn m_mediaConn;             // cached <media_conn>
+    QHash<QString, PendingUpload> m_pendingUploads;   // upload id -> in-flight send
+    QHash<QString, PendingSend> m_waitingForMediaConn; // iq id -> queued send
+    // msgId -> (media kind, CDN metadata) so a later tap can download it.
+    QHash<QString, QPair<int, wa::waproto::MediaInfo> > m_mediaIndex;
     QJsonArray m_preKeys;      // [{id, priv, pub}] one-time pre-keys
     QJsonObject m_sessions;    // address -> hex(signal::serializeRecord)
     QJsonObject m_senderKeyJson;   // "<group>::<user>" -> serialized sender key

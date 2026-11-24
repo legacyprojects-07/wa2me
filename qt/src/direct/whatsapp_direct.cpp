@@ -573,6 +573,39 @@ void WhatsAppDirect::handleNode(const BinaryNode &node) {
             finishSend(iqId, node);
             return;
         }
+        // Answers to <iq xmlns=w:m><media_conn/></iq>.
+        if (node.child("media_conn") || (iqType == "error" &&
+                                         m_waitingForMediaConn.contains(iqId))) {
+            wa::media::MediaConn conn;
+            std::string mediaError;
+            if (!wa::media::parseMediaConn(node, conn, mediaError)) {
+                DLOG(this, "media_conn failed: " + QString::fromStdString(mediaError));
+                if (m_waitingForMediaConn.contains(iqId)) {
+                    const PendingSend waiting = m_waitingForMediaConn.take(iqId);
+                    if (m_pendingUploads.contains(waiting.msgId)) {
+                        m_pendingUploads.remove(waiting.msgId);
+                        emit sendResult(waiting.msgId, false,
+                                        QString::fromStdString(mediaError));
+                    }
+                }
+                return;
+            }
+            conn.fetchedAt = QDateTime::currentSecsSinceEpoch();
+            m_mediaConn = conn;
+            DLOG(this, QString("media connection ready (host %1, ttl %2s)")
+                           .arg(QString::fromStdString(conn.hostname))
+                           .arg(conn.ttlSeconds));
+            const PendingSend waiting = m_waitingForMediaConn.take(iqId);
+            if (!waiting.msgId.isEmpty()) startMediaUpload(waiting);
+            // Any other upload queued while we were waiting.
+            for (auto it = m_waitingForMediaConn.begin();
+                 it != m_waitingForMediaConn.end();) {
+                const PendingSend queued = it.value();
+                it = m_waitingForMediaConn.erase(it);
+                startMediaUpload(queued);
+            }
+            return;
+        }
         // Answers to our <iq xmlns=w:g2><query/></iq> group metadata requests.
         if (m_pendingGroupMeta.contains(iqId) && (iqType == "result" || iqType == "error")) {
             const PendingSend pending = m_pendingGroupMeta.take(iqId);
@@ -684,6 +717,13 @@ void WhatsAppDirect::handleEncryptedMessage(const BinaryNode &node) {
         downloadHistory(msg.historySync);
         return;   // protocol messages are not shown in the chat
     }
+
+    // Keep the CDN metadata of received media so downloadMedia() can fetch it
+    // when the user asks (the message itself only carries the keys).
+    wa::media::Type mediaType = wa::media::Type::Image;
+    wa::waproto::MediaInfo mediaInfo;
+    if (wa::media::mediaInfoOf(msg.message, mediaType, mediaInfo))
+        registerMedia(QString::fromStdString(msg.id), mediaType, mediaInfo);
 
     const Message model = messageModelFor(msg);
     emit messageAdded(model);
@@ -829,12 +869,21 @@ void WhatsAppDirect::sendText(const QString &jid, const QString &text) {
         emit sendResult(QString(), false, "no chat selected");
         return;
     }
-    const QString msgId =
-        QString::fromStdString(wa::messaging::generateMessageId());
+    PendingSend pending;
+    pending.jid = jid;
+    pending.text = text;
+    pending.msgId = QString::fromStdString(wa::messaging::generateMessageId());
+    enqueueSend(pending);
+}
 
-    if (wa::isJidGroup(jid.toStdString())) {
-        PendingSend pending{jid, text, msgId, true};
-        const auto cached = m_groupCache.constFind(jid);
+// Groups need metadata, 1:1 needs device bundles; both are cached, so this is
+// where a send actually starts (text and media share it).
+void WhatsAppDirect::enqueueSend(const PendingSend &incoming) {
+    PendingSend pending = incoming;
+    pending.isGroup = wa::isJidGroup(pending.jid.toStdString());
+
+    if (pending.isGroup) {
+        const auto cached = m_groupCache.constFind(pending.jid);
         if (cached != m_groupCache.constEnd() && !cached->participants.empty()) {
             fetchGroupBundles(pending, *cached);
         } else {
@@ -844,26 +893,227 @@ void WhatsAppDirect::sendText(const QString &jid, const QString &text) {
     }
 
     // Device bundles are cached for a few minutes (Baileys' USER_DEVICES TTL).
-    const QString userJid = QString::fromStdString(
-        wa::jidNormalizedUser(jid.toStdString()));
+    const QString userJid =
+        QString::fromStdString(wa::jidNormalizedUser(pending.jid.toStdString()));
     const qint64 now = QDateTime::currentMSecsSinceEpoch();
-    auto cached = m_bundleCache.find(userJid);
-    if (cached != m_bundleCache.end() &&
-        now - cached->fetchedAt < 5 * 60 * 1000 &&
+    const auto cached = m_bundleCache.constFind(userJid);
+    if (cached != m_bundleCache.constEnd() && now - cached->fetchedAt < 5 * 60 * 1000 &&
         !cached->devices.empty()) {
-        sendWithBundles(PendingSend{jid, text, msgId}, cached->devices);
+        sendWithBundles(pending, cached->devices);
         return;
     }
 
     const QString iqId = QString::fromStdString(wa::messaging::generateMessageId());
-    m_pendingSends.insert(iqId, PendingSend{jid, text, msgId});
+    m_pendingSends.insert(iqId, pending);
 
-    const std::vector<std::string> request{
-        jid.toStdString(), m_meJid.toStdString()};
-    const wa::BinaryNode iq =
-        wa::messaging::buildKeyRequest(iqId.toStdString(), request);
-    DLOG(this, "fetching device bundles for " + jid + "/" + m_meJid);
-    sendNode(iq);
+    const std::vector<std::string> request{pending.jid.toStdString(),
+                                          m_meJid.toStdString()};
+    DLOG(this, "fetching device bundles for " + pending.jid + "/" + m_meJid);
+    sendNode(wa::messaging::buildKeyRequest(iqId.toStdString(), request));
+}
+
+// ─── Media (CDN upload/download) ───────────────────────────────────────────
+
+void WhatsAppDirect::registerMedia(const QString &msgId, wa::media::Type type,
+                                   const wa::waproto::MediaInfo &info) {
+    m_mediaIndex.insert(msgId, qMakePair(int(type), info));
+}
+
+void WhatsAppDirect::sendMedia(const QString &jid, const QString &filePath,
+                               const QString &caption) {
+    if (!m_connected || !m_handshakeDone || m_meJid.isEmpty()) {
+        emit sendResult(QString(), false, "not connected to WhatsApp");
+        return;
+    }
+    if (jid.isEmpty()) {
+        emit sendResult(QString(), false, "no chat selected");
+        return;
+    }
+
+    QFile file(filePath);
+    if (!file.open(QIODevice::ReadOnly)) {
+        emit sendResult(QString(), false, "cannot read " + filePath);
+        return;
+    }
+    const QByteArray raw = file.readAll();
+    file.close();
+    if (raw.isEmpty()) {
+        emit sendResult(QString(), false, "file is empty: " + filePath);
+        return;
+    }
+
+    const QFileInfo info(filePath);
+    const std::string fileName = info.fileName().toStdString();
+    PendingUpload upload;
+    upload.send.jid = jid;
+    upload.send.msgId = QString::fromStdString(wa::messaging::generateMessageId());
+    upload.meta.fileName = fileName;
+    upload.meta.mimetype = wa::media::mimeForFileName(fileName);
+    upload.meta.caption = caption.toStdString();
+    upload.meta.title = fileName;
+    upload.type = wa::media::typeForMime(upload.meta.mimetype, fileName);
+
+    // A fresh media key per file, exactly like Baileys' encryptedStream().
+    const QByteArray mediaKey = randomBytes32();
+    const wa::media::Bytes key(mediaKey.begin(), mediaKey.end());
+    std::string error;
+    if (!wa::media::prepareUpload(toStd(raw), upload.type, key,
+                                  QDateTime::currentSecsSinceEpoch(), upload.uploaded,
+                                  error)) {
+        emit sendResult(upload.send.msgId, false, QString::fromStdString(error));
+        return;
+    }
+
+    const QString uploadId = upload.send.msgId;
+    m_pendingUploads.insert(uploadId, upload);
+    emit mediaProgress(uploadId, "encrypted");
+    DLOG(this, QString("prepared %1 for upload (%2 bytes encrypted)")
+                   .arg(QString::fromStdString(fileName))
+                   .arg(int(upload.uploaded.blob.size())));
+
+    if (m_mediaConn.usable(QDateTime::currentSecsSinceEpoch())) {
+        PendingSend ready;
+        ready.jid = jid;
+        ready.msgId = uploadId;
+        startMediaUpload(ready);
+        return;
+    }
+
+    // Ask the server where to upload; the reply restarts the upload.
+    const QString iqId = QString::fromStdString(wa::messaging::generateMessageId());
+    PendingSend waiting;
+    waiting.jid = jid;
+    waiting.msgId = uploadId;
+    waiting.isMedia = true;
+    m_waitingForMediaConn.insert(iqId, waiting);
+    DLOG(this, "requesting media connection");
+    sendNode(wa::media::buildMediaConnRequest(iqId.toStdString()));
+}
+
+void WhatsAppDirect::startMediaUpload(const PendingSend &pending) {
+    if (!m_pendingUploads.contains(pending.msgId)) return;
+    const PendingUpload &upload = m_pendingUploads[pending.msgId];
+
+    QNetworkRequest request(
+        QUrl(QString::fromStdString(wa::media::uploadUrl(
+            m_mediaConn, upload.type, upload.uploaded.fileEncSha256))));
+    request.setHeader(QNetworkRequest::ContentTypeHeader, "application/octet-stream");
+    request.setRawHeader("Origin", kOrigin);
+
+    const QString uploadId = pending.msgId;
+    QNetworkReply *reply = m_net->post(
+        request, QByteArray(reinterpret_cast<const char *>(upload.uploaded.blob.data()),
+                            int(upload.uploaded.blob.size())));
+    emit mediaProgress(uploadId, "uploading");
+    DLOG(this, QString("uploading %1 (%2 encrypted bytes) to the CDN")
+                   .arg(uploadId)
+                   .arg(int(upload.uploaded.blob.size())));
+
+    connect(reply, &QNetworkReply::finished, this, [this, reply, uploadId]() {
+        const QByteArray body = reply->readAll();
+        const QString errorText =
+            reply->error() == QNetworkReply::NoError ? QString() : reply->errorString();
+        reply->deleteLater();
+        finishMediaUpload(uploadId, body, errorText);
+    });
+}
+
+void WhatsAppDirect::finishMediaUpload(const QString &uploadId, const QByteArray &body,
+                                       const QString &errorText) {
+    if (!m_pendingUploads.contains(uploadId)) return;
+
+    if (!errorText.isEmpty()) {
+        const PendingUpload failed = m_pendingUploads.take(uploadId);
+        const QString reason = errorText + " " + QString::fromUtf8(body.left(200));
+        emit sendResult(failed.send.msgId, false, "upload failed: " + reason);
+        DLOG(this, "media upload failed: " + reason);
+        m_mediaConn.fetchedAt = 0;   // force a fresh media_conn next time
+        return;
+    }
+
+    const QJsonObject result = QJsonDocument::fromJson(body).object();
+    const QString url = result.value("url").toString();
+    const QString directPath = result.value("direct_path").toString();
+    if (url.isEmpty() && directPath.isEmpty()) {
+        const PendingUpload failed = m_pendingUploads.take(uploadId);
+        emit sendResult(failed.send.msgId, false,
+                        "upload response had no url: " + QString::fromUtf8(body.left(200)));
+        DLOG(this, "media upload returned no url: " + QString::fromUtf8(body.left(200)));
+        return;
+    }
+
+    PendingUpload upload = m_pendingUploads.take(uploadId);
+    upload.uploaded.url = url.toStdString();
+    upload.uploaded.directPath = directPath.toStdString();
+    wa::media::fillMediaMessage(upload.type, upload.uploaded, upload.meta,
+                                upload.send.payload);
+    upload.send.isMedia = true;
+    upload.send.text = QString::fromStdString(upload.send.payload.text());
+
+    // Remember the CDN metadata so the sent bubble can be re-downloaded.
+    wa::media::Type kind = upload.type;
+    wa::waproto::MediaInfo mediaInfo;
+    if (wa::media::mediaInfoOf(upload.send.payload, kind, mediaInfo))
+        registerMedia(upload.send.msgId, kind, mediaInfo);
+
+    emit mediaProgress(upload.send.msgId, "uploaded");
+    DLOG(this, "media uploaded to " + (url.isEmpty() ? QString() : url));
+    enqueueSend(upload.send);
+}
+
+bool WhatsAppDirect::downloadMedia(const QString &chatJid, const QString &msgId,
+                                   const QString &savePath) {
+    if (!m_mediaIndex.contains(msgId)) {
+        emit mediaFailed(chatJid, msgId, "no media recorded for this message");
+        return false;
+    }
+    const QPair<int, wa::waproto::MediaInfo> entry = m_mediaIndex.value(msgId);
+    const wa::media::Bytes mediaKey = entry.second.mediaKey;
+    const std::string url =
+        wa::media::downloadUrl(entry.second.url, entry.second.directPath);
+    if (url.empty()) {
+        emit mediaFailed(chatJid, msgId, "message has no CDN url or directPath");
+        return false;
+    }
+
+    QNetworkRequest request(QUrl(QString::fromStdString(url)));
+    request.setRawHeader("Origin", kOrigin);
+    QNetworkReply *reply = m_net->get(request);
+    emit mediaProgress(msgId, "downloading");
+
+    const int kind = entry.first;
+    connect(reply, &QNetworkReply::finished, this,
+            [this, reply, chatJid, msgId, savePath, mediaKey, kind]() {
+                const QByteArray body = reply->readAll();
+                const QString errorText = reply->error() == QNetworkReply::NoError
+                                              ? QString()
+                                              : reply->errorString();
+                reply->deleteLater();
+                if (!errorText.isEmpty()) {
+                    emit mediaFailed(chatJid, msgId, errorText);
+                    return;
+                }
+                wa::media::Bytes plaintext;
+                std::string error;
+                const wa::media::Bytes blob(
+                    reinterpret_cast<const uint8_t *>(body.constData()),
+                    reinterpret_cast<const uint8_t *>(body.constData()) + size_t(body.size()));
+                if (!wa::media::decryptDownload(blob, mediaKey, wa::media::Type(kind),
+                                                plaintext, error)) {
+                    emit mediaFailed(chatJid, msgId, QString::fromStdString(error));
+                    return;
+                }
+                QFile out(savePath);
+                if (!out.open(QIODevice::WriteOnly | QIODevice::Truncate)) {
+                    emit mediaFailed(chatJid, msgId, "cannot write " + savePath);
+                    return;
+                }
+                out.write(QByteArray(reinterpret_cast<const char *>(plaintext.data()),
+                                     int(plaintext.size())));
+                out.close();
+                emit mediaSaved(chatJid, msgId, savePath);
+            });
+    return true;
 }
 
 // ─── Key bundles, pre-key upload ───────────────────────────────────────────
@@ -984,11 +1234,21 @@ void WhatsAppDirect::sendGroupWithBundles(const PendingSend &pending,
 
     wa::messaging::GroupSendPlan plan;
     std::string error;
-    if (!wa::messaging::buildGroupTextStanza(*m_store, *m_senderKeys, m_meJid.toStdString(),
-                                            pending.jid.toStdString(),
-                                            pending.text.toStdString(),
-                                            pending.msgId.toStdString(), filtered, already,
-                                            plan, error)) {
+    const bool built =
+        pending.isMedia
+            ? wa::messaging::buildGroupMessageStanza(*m_store, *m_senderKeys,
+                                                    m_meJid.toStdString(),
+                                                    pending.jid.toStdString(),
+                                                    pending.payload,
+                                                    pending.msgId.toStdString(), filtered,
+                                                    already, plan, error)
+            : wa::messaging::buildGroupTextStanza(*m_store, *m_senderKeys,
+                                                 m_meJid.toStdString(),
+                                                 pending.jid.toStdString(),
+                                                 pending.text.toStdString(),
+                                                 pending.msgId.toStdString(), filtered,
+                                                 already, plan, error);
+    if (!built) {
         emit sendResult(pending.msgId, false, QString::fromStdString(error));
         DLOG(this, "group encrypt failed for " + pending.jid + ": " +
                        QString::fromStdString(error));
@@ -1062,11 +1322,18 @@ void WhatsAppDirect::sendWithBundles(const PendingSend &pending,
     }
 
     wa::messaging::SendPlan plan;
-    if (!wa::messaging::buildTextStanza(*m_store, m_meJid.toStdString(),
-                                        pending.jid.toStdString(),
-                                        pending.text.toStdString(),
-                                        pending.msgId.toStdString(), devices, plan,
-                                        error)) {
+    const bool built =
+        pending.isMedia
+            ? wa::messaging::buildMessageStanza(*m_store, m_meJid.toStdString(),
+                                                pending.jid.toStdString(), pending.payload,
+                                                pending.msgId.toStdString(), devices, plan,
+                                                error)
+            : wa::messaging::buildTextStanza(*m_store, m_meJid.toStdString(),
+                                             pending.jid.toStdString(),
+                                             pending.text.toStdString(),
+                                             pending.msgId.toStdString(), devices, plan,
+                                             error);
+    if (!built) {
         emit sendResult(pending.msgId, false, QString::fromStdString(error));
         DLOG(this, "encrypt failed for " + pending.jid + ": " +
                        QString::fromStdString(error));
